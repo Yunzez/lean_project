@@ -555,8 +555,8 @@ inductive Represents : Val -> Int -> Heap -> Prop where
   | pair {v1 i1 h v2 i2 i} :
     Represents v1 i1 h ->
     Represents v2 i2 h ->
-    Heap.lookup h (i+0) = i1 ->
-    Heap.lookup h (i+1) = i2 ->
+    Heap.lookup h (i+0) = some i1 -> -- added "some" here to ensure "some" is used for Option
+    Heap.lookup h (i+1) = some i2 -> -- added "some" here to ensure "some" is used for Option
     Represents (.pair v1 v2) i h
 
 inductive Related : Stack -> CEnv -> Env -> Heap -> Prop where
@@ -700,6 +700,16 @@ theorem natAbs_le_maxAbsIntList_of_mem {a : Int} {xs : List Int} :
       · apply ih hmem'
         assumption
   simpa [maxAbsIntList] using aux 0 hmem
+
+-- Added these to prove that writing to fresh addr preserves existing lookup
+-- Lemmas: lookup_ext_same, lookup_ext_diff
+theorem lookup_ext_same (h : Heap) (a v : Int) :
+  Heap.lookup (Heap.ext h a v) a = some v := by
+  simp [Heap.lookup, Heap.ext]
+
+theorem lookup_ext_diff (h : Heap) (a b v : Int) (h_ne : b ≠ a) :
+  Heap.lookup (Heap.ext h a v) b = Heap.lookup h b := by
+  simp [Heap.lookup, Heap.ext, h_ne]
 
 theorem lookup_some_mem_dom {h : Heap} {a v : Int} :
   Heap.lookup h a = some v ->
@@ -856,6 +866,42 @@ theorem FreshFrom.step {h : Heap} {a i1 i2 : Int} :
   -- ? Now we can use the original freshness from `a`.
   have := hfresh (k + 2)
   simpa [Int.add_assoc, Int.add_left_comm, Int.add_comm] using this
+
+-- Lemma verifies that if we store two values at b and b+1
+-- Represent a pair/cons at address b
+theorem represents_cons_layout {h : Heap} {v1 v2 : Val} {i1 i2 b : Int}
+  (h_fresh : FreshFrom h b)
+  (h1 : Represents v1 i1 h)
+  (h2 : Represents v2 i2 h) :
+  Represents (.pair v1 v2) b ((h.ext (b + 1) i2).ext b i1) := by
+  let h_mid := h.ext (b + 1) i2
+  let h_fin := h_mid.ext b i1
+  apply Represents.pair
+  · apply Represents.mono h1
+    apply HeapExtends.trans (h' := h_mid)
+    · apply HeapExtends.write
+      have hf1 := h_fresh 1
+      simpa using hf1
+    · apply HeapExtends.write
+      simp [h_mid, Heap.lookup, Heap.ext]
+      have hne : b ≠ b + 1 := by omega
+      simp [hne]
+      have hf0 := h_fresh 0
+      simpa using hf0
+  · apply Represents.mono h2
+    apply HeapExtends.trans (h' := h_mid)
+    · apply HeapExtends.write
+      have hf1 := h_fresh 1
+      simpa using hf1
+    · apply HeapExtends.write
+      simp [h_mid, Heap.lookup, Heap.ext]
+      have hne : b ≠ b + 1 := by omega
+      simp [hne]
+      have hf0 := h_fresh 0
+      simpa using hf0
+  · simp [Heap.lookup, Heap.ext]
+  · have h_ne : b + 1 ≠ b := by omega
+    simp [Heap.lookup, Heap.ext, h_ne]
 
 -- ! The compiler always produces exactly `compile_len e` instructions.
 theorem compile_length (ds : Defns) (c : CEnv) (e : Expr) :
