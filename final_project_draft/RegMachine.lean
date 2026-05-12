@@ -412,7 +412,7 @@ def compile_len (e : Expr) : Nat :=
     compile_len e + 6
   | .nil => 1
   | .cons e1 e2 => compile_len e1 + compile_len e2 + 6
-  | .is_nil e => compile_len e + 3
+  | .is_nil e => compile_len e + 5
 
 def compile_defn_len (d : Defn) : Nat :=
   match d with
@@ -514,9 +514,17 @@ def compile (ds : Defns) (c : CEnv) (e : Expr) : List Instr :=
      .store .rbx .rax 0,
      .movr .rax .rbx,
      .addi .rbx 2]
+  -- | .is_nil e =>
+  --   compile ds c e ++
+  --   [.movi .r9 0, .cmp .rax .r9, .movi .rax 0]
   | .is_nil e =>
     compile ds c e ++
-    [.movi .r9 0, .cmp .rax .r9, .movi .rax 0]
+    [ .movi .r9 0,
+      .cmp .rax .r9,
+      .movi .rax 1,   -- temp set to "true"
+      .bnz 1,         -- if rax not 0, skip next instr
+      .movi .rax 0    -- set to "false"
+    ]
 
 def compile_defn (ds : Defns) (d : Defn) : List Instr :=
   match d with
@@ -555,8 +563,8 @@ inductive Represents : Val -> Int -> Heap -> Prop where
   | pair {v1 i1 h v2 i2 i} :
     Represents v1 i1 h ->
     Represents v2 i2 h ->
-    Heap.lookup h (i+0) = i1 ->
-    Heap.lookup h (i+1) = i2 ->
+    Heap.lookup h (i+0) = some i1 -> -- added "some" here to ensure "some" is used for Option
+    Heap.lookup h (i+1) = some i2 -> -- added "some" here to ensure "some" is used for Option
     Represents (.pair v1 v2) i h
 
 inductive Related : Stack -> CEnv -> Env -> Heap -> Prop where
@@ -701,6 +709,16 @@ theorem natAbs_le_maxAbsIntList_of_mem {a : Int} {xs : List Int} :
         assumption
   simpa [maxAbsIntList] using aux 0 hmem
 
+-- Added these to prove that writing to fresh addr preserves existing lookup
+-- Lemmas: lookup_ext_same, lookup_ext_diff
+theorem lookup_ext_same (h : Heap) (a v : Int) :
+  Heap.lookup (Heap.ext h a v) a = some v := by
+  simp [Heap.lookup, Heap.ext]
+
+theorem lookup_ext_diff (h : Heap) (a b v : Int) (h_ne : b ≠ a) :
+  Heap.lookup (Heap.ext h a v) b = Heap.lookup h b := by
+  simp [Heap.lookup, Heap.ext, h_ne]
+
 theorem lookup_some_mem_dom {h : Heap} {a v : Int} :
   Heap.lookup h a = some v ->
   a ∈ dom h := by
@@ -815,6 +833,11 @@ theorem Represents.pair_inv {v1 v2 i h} :
     rename_i i1 i2
     exact ⟨i1, i2, h1, h2, l1, l2⟩
 
+-- ! Inversion helper for `is_nil`
+theorem Represents.nil_inv {i h} :
+  Represents .nil i h -> i = 0 := by
+  intro h; cases h; rfl
+
 theorem Related.mono {s c r h h'} :
   Related s c r h ->
   HeapExtends h h' ->
@@ -856,6 +879,42 @@ theorem FreshFrom.step {h : Heap} {a i1 i2 : Int} :
   -- ? Now we can use the original freshness from `a`.
   have := hfresh (k + 2)
   simpa [Int.add_assoc, Int.add_left_comm, Int.add_comm] using this
+
+-- Lemma verifies that if we store two values at b and b+1
+-- Represent a pair/cons at address b
+theorem represents_cons_layout {h : Heap} {v1 v2 : Val} {i1 i2 b : Int}
+  (h_fresh : FreshFrom h b)
+  (h1 : Represents v1 i1 h)
+  (h2 : Represents v2 i2 h) :
+  Represents (.pair v1 v2) b ((h.ext (b + 1) i2).ext b i1) := by
+  let h_mid := h.ext (b + 1) i2
+  let h_fin := h_mid.ext b i1
+  apply Represents.pair
+  · apply Represents.mono h1
+    apply HeapExtends.trans (h' := h_mid)
+    · apply HeapExtends.write
+      have hf1 := h_fresh 1
+      simpa using hf1
+    · apply HeapExtends.write
+      simp [h_mid, Heap.lookup, Heap.ext]
+      have hne : b ≠ b + 1 := by omega
+      simp [hne]
+      have hf0 := h_fresh 0
+      simpa using hf0
+  · apply Represents.mono h2
+    apply HeapExtends.trans (h' := h_mid)
+    · apply HeapExtends.write
+      have hf1 := h_fresh 1
+      simpa using hf1
+    · apply HeapExtends.write
+      simp [h_mid, Heap.lookup, Heap.ext]
+      have hne : b ≠ b + 1 := by omega
+      simp [hne]
+      have hf0 := h_fresh 0
+      simpa using hf0
+  · simp [Heap.lookup, Heap.ext]
+  · have h_ne : b + 1 ≠ b := by omega
+    simp [Heap.lookup, Heap.ext, h_ne]
 
 -- ! The compiler always produces exactly `compile_len e` instructions.
 theorem compile_length (ds : Defns) (c : CEnv) (e : Expr) :
@@ -996,6 +1055,20 @@ theorem code_at_after_compile_prefix
   have hlen : (compile ds c e ++ pfx).length = compile_len e + pfx.length := by
     simp [compile_length]
   simpa [hlen, Nat.add_assoc] using htail
+
+theorem code_at_after_two_compiles {ds c e1 e2 is pc pfx1 pfx2 mid sfx} :
+  code_at is pc (compile ds c e1 ++ pfx1 ++ compile ds (none :: c) e2 ++ pfx2 ++ mid ++ sfx) ->
+  code_at is (pc + compile_len e1 + pfx1.length + compile_len e2 + pfx2.length) mid := by
+  intro h
+  have h1 : code_at is (pc + compile_len e1 + pfx1.length) (compile ds (none :: c) e2 ++ pfx2 ++ mid) := by
+    have h_split : code_at is pc (compile ds c e1 ++ pfx1 ++ (compile ds (none :: c) e2 ++ pfx2 ++ mid) ++ sfx) := by
+      simpa [List.append_assoc] using h
+    apply code_at_after_compile_prefix h_split
+  have h2 : code_at is (pc + compile_len e1 + pfx1.length + compile_len e2 + pfx2.length) mid := by
+    have h_split2 : code_at is (pc + compile_len e1 + pfx1.length) (compile ds (none :: c) e2 ++ pfx2 ++ mid ++ []) := by
+      simpa using h1
+    apply code_at_after_compile_prefix h_split2
+  simpa [Nat.add_assoc] using h2
 
 theorem code_at_nil {is : List Instr} {pc : Nat} {code : List Instr} :
   code_at is pc code ->
