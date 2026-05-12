@@ -1730,15 +1730,416 @@ theorem compiler_correct_general
 
   | iftr _ _ ih1 ih2 =>
     -- ! `ifte e1 e2 e3` compiles e1, then branches. The `iftr` case took the
-    -- ! `then` branch, so e1 evaluated to `true` (= 1). After the `cmp`, zf = false,
-    -- ! so `bnz` jumps past `is3` to `is2`. After `is2` we fall through (no
-    -- ! trailing jmp at that point — the `jmp` is after `is3`, not after `is2`).
-    sorry
+    -- ! `then` branch, so e1 evaluated to `true` (= 1). After `cmp rax r9`
+    -- ! (with r9 = 0), zf = false, so `bnz (L3 + 2)` jumps past compile e3
+    -- ! and the trailing `jmp`, landing at compile e2. Apply IH2 there.
+    rename_i r' e1_sub e2_sub v_val e3_sub _hev1 _hev2
+    -- ! 1) Locate sub-pieces. Layout:
+    -- !    compile e1 ++ [movi r9 0, cmp, bnz (L3+2)] ++ compile e3 ++
+    -- !    [jmp (L2+1)] ++ compile e2
+    have hcode_e1 : code_at is pc (compile ds c e1_sub) :=
+      code_at_compile_left
+        (tail := [.movi .r9 0, .cmp .rax .r9,
+                  .bnz ((compile ds c e3_sub).length + 2 : Nat)] ++
+                 compile ds c e3_sub ++
+                 [.jmp ((compile ds c e2_sub).length + 1 : Nat)] ++
+                 compile ds c e2_sub)
+        (by simpa [compile, List.append_assoc] using hcode)
+    have hmovi_at_abs : instr_at is (pc + compile_len e1_sub) (.movi .r9 0) := by
+      have hmid : code_at is (pc + compile_len e1_sub) [.movi .r9 0] := by
+        simpa using
+          (code_at_after_compile_prefix
+            (pfx := []) (mid := [.movi .r9 0])
+            (sfx := [.cmp .rax .r9, .bnz ((compile ds c e3_sub).length + 2 : Nat)] ++
+                    compile ds c e3_sub ++
+                    [.jmp ((compile ds c e2_sub).length + 1 : Nat)] ++
+                    compile ds c e2_sub)
+            (by simpa [compile, List.append_assoc] using hcode))
+      exact code_at_head hmid
+    have hcmp_at_abs : instr_at is (pc + compile_len e1_sub + 1) (.cmp .rax .r9) := by
+      have hmid : code_at is (pc + compile_len e1_sub + 1) [.cmp .rax .r9] := by
+        simpa using
+          (code_at_after_compile_prefix
+            (pfx := [.movi .r9 0]) (mid := [.cmp .rax .r9])
+            (sfx := [.bnz ((compile ds c e3_sub).length + 2 : Nat)] ++
+                    compile ds c e3_sub ++
+                    [.jmp ((compile ds c e2_sub).length + 1 : Nat)] ++
+                    compile ds c e2_sub)
+            (by simpa [compile, List.append_assoc] using hcode))
+      exact code_at_head hmid
+    have hbnz_at_abs :
+        instr_at is (pc + compile_len e1_sub + 2)
+          (.bnz ((compile ds c e3_sub).length + 2 : Nat)) := by
+      have hmid : code_at is (pc + compile_len e1_sub + 2)
+          [.bnz ((compile ds c e3_sub).length + 2 : Nat)] := by
+        simpa using
+          (code_at_after_compile_prefix
+            (pfx := [.movi .r9 0, .cmp .rax .r9])
+            (mid := [.bnz ((compile ds c e3_sub).length + 2 : Nat)])
+            (sfx := compile ds c e3_sub ++
+                    [.jmp ((compile ds c e2_sub).length + 1 : Nat)] ++
+                    compile ds c e2_sub)
+            (by simpa [compile, List.append_assoc] using hcode))
+      exact code_at_head hmid
+    have hL3eq : (compile ds c e3_sub).length = compile_len e3_sub := compile_length _ _ _
+    have hL2eq : (compile ds c e2_sub).length = compile_len e2_sub := compile_length _ _ _
+    -- ! compile e2 sits after compile e1 ++ [3 trivial] ++ compile e3 ++ [jmp].
+    have hcode_e2_abs :
+        code_at is (pc + compile_len e1_sub + compile_len e3_sub + 4)
+          (compile ds c e2_sub) := by
+      have h := code_at_after_compile_prefix
+        (pfx := [.movi .r9 0, .cmp .rax .r9,
+                 .bnz ((compile ds c e3_sub).length + 2 : Nat)] ++
+                compile ds c e3_sub ++
+                [.jmp ((compile ds c e2_sub).length + 1 : Nat)])
+        (mid := compile ds c e2_sub)
+        (sfx := [])
+        (by simpa [compile, List.append_assoc] using hcode)
+      have hpfx_len :
+          (([.movi .r9 0, .cmp .rax .r9,
+            .bnz ((compile ds c e3_sub).length + 2 : Nat)] : List Instr) ++
+           compile ds c e3_sub ++
+           ([.jmp ((compile ds c e2_sub).length + 1 : Nat)] : List Instr)).length
+          = compile_len e3_sub + 4 := by
+        simp [List.length_append, hL3eq]
+      rw [hpfx_len] at h
+      have heq : pc + compile_len e1_sub + (compile_len e3_sub + 4)
+               = pc + compile_len e1_sub + compile_len e3_sub + 4 := by omega
+      rw [heq] at h
+      exact h
+    -- ! 2) IH1 → s1, rax = 1 (true)
+    rcases ih1 hcode_e1 hrel hfresh with
+      ⟨s1, hs1, ⟨hpc1, hstack1, hrepr1, hext1⟩, hfresh1⟩
+    have hrax1 : s1.regs.rax = 1 := by
+      have h := Represents.bool_inv hrepr1
+      simpa using h
+    -- ! 3) movi r9 0 at s1 → s2
+    let s2 : State :=
+      { s1 with
+        pc := s1.pc + 1
+        regs := Reg.write .r9 0 s1.regs }
+    have hmovi' : instr_at is s1.pc (.movi .r9 0) := by simpa [hpc1] using hmovi_at_abs
+    have hstep_movi : Step is s1 s2 := Step.movi (s := s1) hmovi'
+    -- ! 4) cmp rax r9 at s2 → s3. After this, zf = (rax == r9) = (1 == 0) = false.
+    let s3 : State :=
+      { s2 with
+        pc := s2.pc + 1
+        zf := (Reg.read .rax s2.regs == Reg.read .r9 s2.regs) }
+    have hcmp' : instr_at is s2.pc (.cmp .rax .r9) := by
+      show instr_at is (s1.pc + 1) (.cmp .rax .r9)
+      have hh : (s1.pc + 1 : Nat) = pc + compile_len e1_sub + 1 := by rw [hpc1]
+      rw [hh]; exact hcmp_at_abs
+    have hstep_cmp : Step is s2 s3 := Step.cmp (s := s2) hcmp'
+    have hzf3 : s3.zf = false := by
+      show (Reg.read .rax s2.regs == Reg.read .r9 s2.regs) = false
+      have hr9 : Reg.read .r9 s2.regs = 0 := by
+        show (Reg.write .r9 0 s1.regs).r9 = 0
+        simp [Reg.write]
+      have hax : Reg.read .rax s2.regs = 1 := by
+        show (Reg.write .r9 0 s1.regs).rax = 1
+        show s1.regs.rax = 1
+        exact hrax1
+      rw [hax, hr9]; decide
+    -- ! 5) bnz (L3 + 2) at s3 → s4. zf = false, so bnzt jumps to pc + L1 + L3 + 4.
+    let s4 : State :=
+      { s3 with
+        pc := (Int.ofNat s3.pc +
+               ((compile ds c e3_sub).length + 2 : Nat)).toNat }
+    have hbnz' : instr_at is s3.pc
+        (.bnz ((compile ds c e3_sub).length + 2 : Nat)) := by
+      show instr_at is (s2.pc + 1) _
+      show instr_at is (s1.pc + 1 + 1) _
+      have hh : (s1.pc + 1 + 1 : Nat) = pc + compile_len e1_sub + 2 := by rw [hpc1]
+      rw [hh]; exact hbnz_at_abs
+    have hstep_bnz : Step is s3 s4 := Step.bnzt (s := s3) hbnz' hzf3
+    -- ! Compute s4.pc.
+    have hpc3eq : s3.pc = pc + compile_len e1_sub + 2 := by
+      show s2.pc + 1 = _
+      show s1.pc + 1 + 1 = _
+      rw [hpc1]
+    have hpc4 : s4.pc = pc + compile_len e1_sub + compile_len e3_sub + 4 := by
+      show (Int.ofNat s3.pc +
+            ((compile ds c e3_sub).length + 2 : Nat)).toNat = _
+      rw [hpc3eq, hL3eq]
+      -- (Int.ofNat (pc + L1 + 2) + Int.ofNat (L3 + 2)).toNat
+      -- reduces by defeq to (pc + L1 + 2) + (L3 + 2)
+      show pc + compile_len e1_sub + 2 + (compile_len e3_sub + 2)
+         = pc + compile_len e1_sub + compile_len e3_sub + 4
+      omega
+    -- ! 6) IH2 from s4: compile e2 lives at s4.pc.
+    have hcode_e2_at_s4 : code_at is s4.pc (compile ds c e2_sub) := by
+      rw [hpc4]; exact hcode_e2_abs
+    have hheap_s4 : s4.heap = s1.heap := by
+      show s3.heap = s1.heap; show s2.heap = s1.heap; rfl
+    have hrel4 : Related stk c r' s4.heap := by
+      rw [hheap_s4]; exact Related.mono hrel hext1
+    have hrbx_s4 : s4.regs.rbx = s1.regs.rbx := by
+      show s3.regs.rbx = s1.regs.rbx
+      show s2.regs.rbx = s1.regs.rbx
+      show (Reg.write .r9 0 s1.regs).rbx = s1.regs.rbx
+      simp [Reg.write]
+    have hfresh4 : FreshFrom s4.heap s4.regs.rbx := by
+      rw [hheap_s4, hrbx_s4]; exact hfresh1
+    rcases ih2 (pc := s4.pc) (stk := stk) (k := k)
+               (rs := s4.regs) (zf := s4.zf) (h := s4.heap) (c := c)
+               hcode_e2_at_s4 hrel4 hfresh4 with
+      ⟨s5, hs5_raw, ⟨hpc5, hstack5, hrepr5, hext5⟩, hfresh5⟩
+    -- ! Bridge: IH2's start state vs our s4. Stack must match.
+    have hstack_s4 : s4.stack = stk ++ k := by
+      show s3.stack = stk ++ k
+      show s2.stack = stk ++ k
+      show s1.stack = stk ++ k
+      exact hstack1
+    have hstart_eq :
+        ({ pc := s4.pc, regs := s4.regs, stack := stk ++ k,
+           zf := s4.zf, heap := s4.heap } : State) = s4 := by
+      rw [← hstack_s4]
+    have hs4_to_s5 : Steps is s4 s5 := hstart_eq ▸ hs5_raw
+    refine ⟨s5, ?_, ?_, ?_⟩
+    · -- ! Chain: initial →* s1 (IH1), s1 → s2 → s3 → s4 (trivial steps), s4 →* s5 (IH2).
+      have h_s1_to_s2 : Steps is s1 s2 := Steps.trans Steps.refl hstep_movi
+      have h_s1_to_s3 : Steps is s1 s3 := Steps.trans h_s1_to_s2 hstep_cmp
+      have h_s1_to_s4 : Steps is s1 s4 := Steps.trans h_s1_to_s3 hstep_bnz
+      have h_s1_to_s5 : Steps is s1 s5 := Steps.append h_s1_to_s4 hs4_to_s5
+      exact Steps.append hs1 h_s1_to_s5
+    · refine ⟨?_, ?_, ?_, ?_⟩
+      · -- ! Final pc: s5.pc = s4.pc + L2 = pc + L1 + L3 + 4 + L2 = pc + compile_len.
+        show s5.pc = pc + compile_len (.ifte e1_sub e2_sub e3_sub)
+        rw [hpc5, hpc4]
+        simp [compile_len]; omega
+      · -- ! stack: IH2 promises s5.stack = stk ++ k.
+        exact hstack5
+      · -- ! rax represents v_val (output of IH2).
+        exact hrepr5
+      · -- ! Heap chain: hext1 ∘ hext5 (no intermediate stores).
+        have hheap_s5_extends_s4 : HeapExtends s4.heap s5.heap := hext5
+        rw [hheap_s4] at hheap_s5_extends_s4
+        exact HeapExtends.trans hext1 hheap_s5_extends_s4
+    · -- ! FreshFrom: directly from hfresh5 (IH2 preserves it).
+      exact hfresh5
 
   | iffr _ _ ih1 ih2 =>
-    -- ! Mirror of `iftr`: e1 evaluated to `false` (= 0), zf = true after `cmp`,
-    -- ! so `bnz` falls through and runs `is3` then jumps over `is2`.
-    sorry
+    -- ! Mirror of `iftr`: e1 → false (= 0), so zf = (0 == 0) = true after `cmp`.
+    -- ! `bnz (L3+2)` falls through (bnzf), running compile e3, then `jmp (L2+1)`
+    -- ! skips over compile e2 to the end.
+    rename_i r' e1_sub e3_sub v_val e2_sub _hev1 _hev2
+    -- ! Locate sub-pieces (same layout as iftr).
+    have hcode_e1 : code_at is pc (compile ds c e1_sub) :=
+      code_at_compile_left
+        (tail := [.movi .r9 0, .cmp .rax .r9,
+                  .bnz ((compile ds c e3_sub).length + 2 : Nat)] ++
+                 compile ds c e3_sub ++
+                 [.jmp ((compile ds c e2_sub).length + 1 : Nat)] ++
+                 compile ds c e2_sub)
+        (by simpa [compile, List.append_assoc] using hcode)
+    have hmovi_at_abs : instr_at is (pc + compile_len e1_sub) (.movi .r9 0) := by
+      have hmid : code_at is (pc + compile_len e1_sub) [.movi .r9 0] := by
+        simpa using
+          (code_at_after_compile_prefix
+            (pfx := []) (mid := [.movi .r9 0])
+            (sfx := [.cmp .rax .r9, .bnz ((compile ds c e3_sub).length + 2 : Nat)] ++
+                    compile ds c e3_sub ++
+                    [.jmp ((compile ds c e2_sub).length + 1 : Nat)] ++
+                    compile ds c e2_sub)
+            (by simpa [compile, List.append_assoc] using hcode))
+      exact code_at_head hmid
+    have hcmp_at_abs : instr_at is (pc + compile_len e1_sub + 1) (.cmp .rax .r9) := by
+      have hmid : code_at is (pc + compile_len e1_sub + 1) [.cmp .rax .r9] := by
+        simpa using
+          (code_at_after_compile_prefix
+            (pfx := [.movi .r9 0]) (mid := [.cmp .rax .r9])
+            (sfx := [.bnz ((compile ds c e3_sub).length + 2 : Nat)] ++
+                    compile ds c e3_sub ++
+                    [.jmp ((compile ds c e2_sub).length + 1 : Nat)] ++
+                    compile ds c e2_sub)
+            (by simpa [compile, List.append_assoc] using hcode))
+      exact code_at_head hmid
+    have hbnz_at_abs :
+        instr_at is (pc + compile_len e1_sub + 2)
+          (.bnz ((compile ds c e3_sub).length + 2 : Nat)) := by
+      have hmid : code_at is (pc + compile_len e1_sub + 2)
+          [.bnz ((compile ds c e3_sub).length + 2 : Nat)] := by
+        simpa using
+          (code_at_after_compile_prefix
+            (pfx := [.movi .r9 0, .cmp .rax .r9])
+            (mid := [.bnz ((compile ds c e3_sub).length + 2 : Nat)])
+            (sfx := compile ds c e3_sub ++
+                    [.jmp ((compile ds c e2_sub).length + 1 : Nat)] ++
+                    compile ds c e2_sub)
+            (by simpa [compile, List.append_assoc] using hcode))
+      exact code_at_head hmid
+    have hL3eq : (compile ds c e3_sub).length = compile_len e3_sub := compile_length _ _ _
+    have hL2eq : (compile ds c e2_sub).length = compile_len e2_sub := compile_length _ _ _
+    -- ! compile e3 starts at pc + L1 + 3.
+    have hcode_e3_abs :
+        code_at is (pc + compile_len e1_sub + 3) (compile ds c e3_sub) := by
+      have h := code_at_after_compile_prefix
+        (pfx := [.movi .r9 0, .cmp .rax .r9,
+                 .bnz ((compile ds c e3_sub).length + 2 : Nat)])
+        (mid := compile ds c e3_sub)
+        (sfx := [.jmp ((compile ds c e2_sub).length + 1 : Nat)] ++
+                compile ds c e2_sub)
+        (by simpa [compile, List.append_assoc] using hcode)
+      simpa using h
+    -- ! The trailing `jmp` lives at pc + L1 + 3 + L3.
+    have hjmp_at_abs :
+        instr_at is (pc + compile_len e1_sub + 3 + compile_len e3_sub)
+          (.jmp ((compile ds c e2_sub).length + 1 : Nat)) := by
+      have hmid : code_at is (pc + compile_len e1_sub + 3 + compile_len e3_sub)
+          [.jmp ((compile ds c e2_sub).length + 1 : Nat)] := by
+        have h := code_at_after_compile_prefix
+          (pfx := [.movi .r9 0, .cmp .rax .r9,
+                   .bnz ((compile ds c e3_sub).length + 2 : Nat)] ++
+                  compile ds c e3_sub)
+          (mid := [.jmp ((compile ds c e2_sub).length + 1 : Nat)])
+          (sfx := compile ds c e2_sub)
+          (by simpa [compile, List.append_assoc] using hcode)
+        have hpfx_len :
+            (([.movi .r9 0, .cmp .rax .r9,
+              .bnz ((compile ds c e3_sub).length + 2 : Nat)] : List Instr) ++
+             compile ds c e3_sub).length
+            = compile_len e3_sub + 3 := by
+          simp [hL3eq]
+        rw [hpfx_len] at h
+        have heq : pc + compile_len e1_sub + (compile_len e3_sub + 3)
+                 = pc + compile_len e1_sub + 3 + compile_len e3_sub := by omega
+        rw [heq] at h
+        exact h
+      exact code_at_head hmid
+    -- ! 2) IH1 → s1, rax = 0 (false)
+    rcases ih1 hcode_e1 hrel hfresh with
+      ⟨s1, hs1, ⟨hpc1, hstack1, hrepr1, hext1⟩, hfresh1⟩
+    have hrax1 : s1.regs.rax = 0 := by
+      have h := Represents.bool_inv hrepr1
+      simpa using h
+    -- ! 3) movi r9 0 at s1 → s2
+    let s2 : State :=
+      { s1 with
+        pc := s1.pc + 1
+        regs := Reg.write .r9 0 s1.regs }
+    have hmovi' : instr_at is s1.pc (.movi .r9 0) := by simpa [hpc1] using hmovi_at_abs
+    have hstep_movi : Step is s1 s2 := Step.movi (s := s1) hmovi'
+    -- ! 4) cmp rax r9 at s2 → s3. zf = (0 == 0) = true.
+    let s3 : State :=
+      { s2 with
+        pc := s2.pc + 1
+        zf := (Reg.read .rax s2.regs == Reg.read .r9 s2.regs) }
+    have hcmp' : instr_at is s2.pc (.cmp .rax .r9) := by
+      show instr_at is (s1.pc + 1) (.cmp .rax .r9)
+      have hh : (s1.pc + 1 : Nat) = pc + compile_len e1_sub + 1 := by rw [hpc1]
+      rw [hh]; exact hcmp_at_abs
+    have hstep_cmp : Step is s2 s3 := Step.cmp (s := s2) hcmp'
+    have hzf3 : s3.zf = true := by
+      show (Reg.read .rax s2.regs == Reg.read .r9 s2.regs) = true
+      have hr9 : Reg.read .r9 s2.regs = 0 := by
+        show (Reg.write .r9 0 s1.regs).r9 = 0
+        simp [Reg.write]
+      have hax : Reg.read .rax s2.regs = 0 := by
+        show (Reg.write .r9 0 s1.regs).rax = 0
+        show s1.regs.rax = 0
+        exact hrax1
+      rw [hax, hr9]; decide
+    -- ! 5) bnz (L3 + 2) at s3 → s4. zf = true, so bnzf falls through (pc + 1).
+    let s4 : State :=
+      { s3 with
+        pc := s3.pc + 1 }
+    have hbnz' : instr_at is s3.pc
+        (.bnz ((compile ds c e3_sub).length + 2 : Nat)) := by
+      show instr_at is (s2.pc + 1) _
+      show instr_at is (s1.pc + 1 + 1) _
+      have hh : (s1.pc + 1 + 1 : Nat) = pc + compile_len e1_sub + 2 := by rw [hpc1]
+      rw [hh]; exact hbnz_at_abs
+    have hstep_bnz : Step is s3 s4 := Step.bnzf (s := s3) hbnz' hzf3
+    -- ! Compute s4.pc = pc + L1 + 3.
+    have hpc3eq : s3.pc = pc + compile_len e1_sub + 2 := by
+      show s2.pc + 1 = _
+      show s1.pc + 1 + 1 = _
+      rw [hpc1]
+    have hpc4 : s4.pc = pc + compile_len e1_sub + 3 := by
+      show s3.pc + 1 = _
+      rw [hpc3eq]
+    -- ! 6) IH2 (which is on e3 for iffr, since the second Eval premise is on e3) → s5.
+    have hheap_s4 : s4.heap = s1.heap := by
+      show s3.heap = s1.heap; show s2.heap = s1.heap; rfl
+    have hrbx_s4 : s4.regs.rbx = s1.regs.rbx := by
+      show s3.regs.rbx = s1.regs.rbx
+      show s2.regs.rbx = s1.regs.rbx
+      show (Reg.write .r9 0 s1.regs).rbx = s1.regs.rbx
+      simp [Reg.write]
+    have hcode_e3_at_s4 : code_at is s4.pc (compile ds c e3_sub) := by
+      rw [hpc4]; exact hcode_e3_abs
+    have hrel4 : Related stk c r' s4.heap := by
+      rw [hheap_s4]; exact Related.mono hrel hext1
+    have hfresh4 : FreshFrom s4.heap s4.regs.rbx := by
+      rw [hheap_s4, hrbx_s4]; exact hfresh1
+    rcases ih2 (pc := s4.pc) (stk := stk) (k := k)
+               (rs := s4.regs) (zf := s4.zf) (h := s4.heap) (c := c)
+               hcode_e3_at_s4 hrel4 hfresh4 with
+      ⟨s5, hs5_raw, ⟨hpc5, hstack5, hrepr5, hext5⟩, hfresh5⟩
+    have hstack_s4 : s4.stack = stk ++ k := by
+      show s3.stack = stk ++ k
+      show s2.stack = stk ++ k
+      show s1.stack = stk ++ k
+      exact hstack1
+    have hstart_eq :
+        ({ pc := s4.pc, regs := s4.regs, stack := stk ++ k,
+           zf := s4.zf, heap := s4.heap } : State) = s4 := by
+      rw [← hstack_s4]
+    have hs4_to_s5 : Steps is s4 s5 := hstart_eq ▸ hs5_raw
+    -- ! 7) jmp (L2 + 1) at s5 → s6.
+    let s6 : State :=
+      { s5 with
+        pc := (Int.ofNat s5.pc +
+               ((compile ds c e2_sub).length + 1 : Nat)).toNat }
+    have hpc5eq : s5.pc = pc + compile_len e1_sub + 3 + compile_len e3_sub := by
+      have h : s5.pc = s4.pc + compile_len e3_sub := hpc5
+      rw [h, hpc4]
+    have hjmp' : instr_at is s5.pc
+        (.jmp ((compile ds c e2_sub).length + 1 : Nat)) := by
+      rw [hpc5eq]; exact hjmp_at_abs
+    have hstep_jmp : Step is s5 s6 := Step.jmp (s := s5) hjmp'
+    -- ! Compute s6.pc = pc + L1 + L2 + L3 + 4.
+    have hpc6 : s6.pc = pc + compile_len e1_sub + compile_len e2_sub + compile_len e3_sub + 4 := by
+      show (Int.ofNat s5.pc +
+            ((compile ds c e2_sub).length + 1 : Nat)).toNat = _
+      rw [hpc5eq, hL2eq]
+      show pc + compile_len e1_sub + 3 + compile_len e3_sub + (compile_len e2_sub + 1)
+         = pc + compile_len e1_sub + compile_len e2_sub + compile_len e3_sub + 4
+      omega
+    refine ⟨s6, ?_, ?_, ?_⟩
+    · -- ! Chain: initial →* s1, s1 → s2 → s3 → s4 (trivial), s4 →* s5 (IH2), s5 → s6 (jmp).
+      have h_s1_to_s2 : Steps is s1 s2 := Steps.trans Steps.refl hstep_movi
+      have h_s1_to_s3 : Steps is s1 s3 := Steps.trans h_s1_to_s2 hstep_cmp
+      have h_s1_to_s4 : Steps is s1 s4 := Steps.trans h_s1_to_s3 hstep_bnz
+      have h_s1_to_s5 : Steps is s1 s5 := Steps.append h_s1_to_s4 hs4_to_s5
+      have h_s1_to_s6 : Steps is s1 s6 := Steps.trans h_s1_to_s5 hstep_jmp
+      exact Steps.append hs1 h_s1_to_s6
+    · refine ⟨?_, ?_, ?_, ?_⟩
+      · -- ! Final pc: s6.pc = pc + compile_len(.ifte e1 e2 e3).
+        show s6.pc = pc + compile_len (.ifte e1_sub e2_sub e3_sub)
+        rw [hpc6]
+        simp [compile_len]; omega
+      · -- ! Stack: s6.stack = s5.stack = stk ++ k (by IH2).
+        show s6.stack = stk ++ k
+        show s5.stack = stk ++ k
+        exact hstack5
+      · -- ! rax: IH2 gave Represents v_val s5.regs.rax s5.heap; s6 doesn't touch rax/heap.
+        show Represents v_val s6.regs.rax s6.heap
+        show Represents v_val s5.regs.rax s5.heap
+        exact hrepr5
+      · -- ! Heap chain.
+        show HeapExtends h s6.heap
+        have hheap_s6 : s6.heap = s5.heap := by rfl
+        rw [hheap_s6]
+        have : HeapExtends s4.heap s5.heap := hext5
+        rw [hheap_s4] at this
+        exact HeapExtends.trans hext1 this
+    · -- ! FreshFrom: s6 doesn't touch rbx or heap relative to s5.
+      show FreshFrom s6.heap s6.regs.rbx
+      have hheap_s6 : s6.heap = s5.heap := by rfl
+      have hrbx_s6 : s6.regs.rbx = s5.regs.rbx := by rfl
+      rw [hheap_s6, hrbx_s6]
+      exact hfresh5
 
   | negtr _ ih =>
     -- ! `neg e` compiles to `compile e ++ [movi r9 1, xor rax r9]`.
@@ -2021,14 +2422,311 @@ theorem compiler_correct_general
 
   | pairr _ _ ih1 ih2 =>
     -- ! `pair e1 e2` compiles to:
-    -- !   compile e1 ; push rax ; compile e2 ; store rbx rax 1 ; pop rax ; store rbx rax 0 ; movr rax rbx ; addi rbx 2
-    -- ! After IH1 we have v1's representation in rax; push it.
-    -- ! After IH2 we have v2 in rax; store it at heap[rbx+1].
-    -- ! Pop v1 back, store at heap[rbx+0], set rax = rbx (the address), bump rbx by 2.
-    -- ! For `Represents.pair` we need to show both fields are in the new heap.
-    -- ! `FreshFrom` carries us through the two `store`s; the new rbx is fresh
-    -- ! from the extended heap.
-    sorry
+    -- !   compile e1 ; push rax ; compile e2 ;
+    -- !   store rbx rax 1 ; pop rax ; store rbx rax 0 ; movr rax rbx ; addi rbx 2
+    -- ! After IH1 we have v1 in rax; push it. After IH2 we have v2 in rax;
+    -- ! store v2 at heap[rbx+1]. Pop v1 back, store v1 at heap[rbx+0],
+    -- ! set rax = rbx (the pair address), bump rbx by 2.
+    -- ! `Represents.pair` is then built from the two heap lookups. The two
+    -- ! cells are fresh thanks to `hfresh3`; `FreshFrom.step` carries the
+    -- ! freshness invariant past the allocation.
+    rename_i r' e1_sub v1_val e2_sub v2_val _hev1 _hev2
+    -- ! 1) Locate sub-pieces inside `is`.
+    have hcode_e1 : code_at is pc (compile ds c e1_sub) :=
+      code_at_compile_left
+        (tail := [.push .rax] ++ compile ds (none :: c) e2_sub ++
+                 [.store .rbx .rax 1, .pop .rax, .store .rbx .rax 0,
+                  .movr .rax .rbx, .addi .rbx 2])
+        (by simpa [compile, List.append_assoc] using hcode)
+    have hpush_at_abs : instr_at is (pc + compile_len e1_sub) (.push .rax) := by
+      have hmid : code_at is (pc + compile_len e1_sub) [.push .rax] := by
+        simpa using
+          (code_at_after_compile_prefix
+            (pfx := []) (mid := [.push .rax])
+            (sfx := compile ds (none :: c) e2_sub ++
+                    [.store .rbx .rax 1, .pop .rax, .store .rbx .rax 0,
+                     .movr .rax .rbx, .addi .rbx 2])
+            (by simpa [compile, List.append_assoc] using hcode))
+      exact code_at_head hmid
+    have hcode_e2_abs :
+        code_at is (pc + compile_len e1_sub + 1) (compile ds (none :: c) e2_sub) := by
+      simpa using
+        (code_at_after_compile_prefix
+          (pfx := [.push .rax]) (mid := compile ds (none :: c) e2_sub)
+          (sfx := [.store .rbx .rax 1, .pop .rax, .store .rbx .rax 0,
+                   .movr .rax .rbx, .addi .rbx 2])
+          (by simpa [compile, List.append_assoc] using hcode))
+    have htail_at :
+        code_at is (pc + compile_len e1_sub + 1 + compile_len e2_sub)
+          [.store .rbx .rax 1, .pop .rax, .store .rbx .rax 0,
+           .movr .rax .rbx, .addi .rbx 2] := by
+      have h : code_at is (pc + compile_len e1_sub + 1)
+          (compile ds (none :: c) e2_sub ++
+           [.store .rbx .rax 1, .pop .rax, .store .rbx .rax 0,
+            .movr .rax .rbx, .addi .rbx 2]) := by
+        simpa [List.append_assoc] using
+          (code_at_after_compile_prefix
+            (pfx := [.push .rax])
+            (mid := compile ds (none :: c) e2_sub ++
+                    [.store .rbx .rax 1, .pop .rax, .store .rbx .rax 0,
+                     .movr .rax .rbx, .addi .rbx 2])
+            (sfx := [])
+            (by simpa [compile, List.append_assoc] using hcode))
+      have h2 : code_at is
+          ((pc + compile_len e1_sub + 1) + (compile ds (none :: c) e2_sub).length)
+          [.store .rbx .rax 1, .pop .rax, .store .rbx .rax 0,
+           .movr .rax .rbx, .addi .rbx 2] :=
+        code_at_app_right
+          (c1 := compile ds (none :: c) e2_sub)
+          (c2 := [.store .rbx .rax 1, .pop .rax, .store .rbx .rax 0,
+                  .movr .rax .rbx, .addi .rbx 2]) h
+      have hlen : (compile ds (none :: c) e2_sub).length = compile_len e2_sub :=
+        compile_length _ _ _
+      rw [hlen] at h2
+      exact h2
+    have hstore1_at_abs :
+        instr_at is (pc + compile_len e1_sub + 1 + compile_len e2_sub)
+          (.store .rbx .rax 1) :=
+      code_at_head htail_at
+    have hpop_at_abs :
+        instr_at is (pc + compile_len e1_sub + 1 + compile_len e2_sub + 1)
+          (.pop .rax) :=
+      code_at_head (code_at_tail htail_at)
+    have hstore2_at_abs :
+        instr_at is (pc + compile_len e1_sub + 1 + compile_len e2_sub + 2)
+          (.store .rbx .rax 0) :=
+      code_at_head (code_at_tail (code_at_tail htail_at))
+    have hmovr_at_abs :
+        instr_at is (pc + compile_len e1_sub + 1 + compile_len e2_sub + 3)
+          (.movr .rax .rbx) :=
+      code_at_head (code_at_tail (code_at_tail (code_at_tail htail_at)))
+    have haddi_at_abs :
+        instr_at is (pc + compile_len e1_sub + 1 + compile_len e2_sub + 4)
+          (.addi .rbx 2) :=
+      code_at_head (code_at_tail (code_at_tail (code_at_tail (code_at_tail htail_at))))
+    -- ! 2) IH1 → s1
+    rcases ih1 hcode_e1 hrel hfresh with
+      ⟨s1, hs1, ⟨hpc1, hstack1, hrepr1, hext1⟩, hfresh1⟩
+    -- ! 3) push rax at s1 → s2
+    let s2 : State :=
+      { pc := s1.pc + 1, regs := s1.regs,
+        stack := s1.regs.rax :: (stk ++ k),
+        zf := s1.zf, heap := s1.heap }
+    have hpush' : instr_at is s1.pc (.push .rax) := by
+      simpa [hpc1] using hpush_at_abs
+    have hstep_push : Step is s1 s2 := by
+      have hraw := Step.push (s := s1) hpush'
+      have hstack_eq : s1.regs.rax :: s1.stack = s1.regs.rax :: (stk ++ k) := by
+        rw [hstack1]
+      simpa [s2, Reg.read, hstack_eq] using hraw
+    -- ! 4) Set up IH2 inputs.
+    have hrel2 : Related (s1.regs.rax :: stk) (none :: c) r' s2.heap := by
+      have hheap : s2.heap = s1.heap := by rfl
+      rw [hheap]
+      exact Related.push (Related.mono hrel hext1)
+    have hfresh2 : FreshFrom s2.heap s2.regs.rbx := by
+      have hheap : s2.heap = s1.heap := by rfl
+      have hrbx : s2.regs.rbx = s1.regs.rbx := by rfl
+      rw [hheap, hrbx]
+      exact hfresh1
+    have hcode_e2 : code_at is s2.pc (compile ds (none :: c) e2_sub) := by
+      have hpc2eq : s2.pc = pc + compile_len e1_sub + 1 := by
+        show s1.pc + 1 = pc + compile_len e1_sub + 1
+        rw [hpc1]
+      rw [hpc2eq]
+      exact hcode_e2_abs
+    rcases ih2 (pc := s2.pc) (stk := s1.regs.rax :: stk) (k := k)
+               (rs := s2.regs) (zf := s2.zf) (h := s2.heap) (c := none :: c)
+               hcode_e2 hrel2 hfresh2 with
+      ⟨s3, hs3_raw, ⟨hpc3, hstack3, hrepr3, hext3⟩, hfresh3⟩
+    -- ! IH2's start state is exactly s2.
+    have hstart_eq :
+        ({ pc := s2.pc, regs := s2.regs, stack := (s1.regs.rax :: stk) ++ k,
+           zf := s2.zf, heap := s2.heap } : State) = s2 := by
+      show ({ pc := s2.pc, regs := s2.regs, stack := s1.regs.rax :: (stk ++ k),
+              zf := s2.zf, heap := s2.heap } : State) = s2
+      rfl
+    have hs2_to_s3 : Steps is s2 s3 := hstart_eq ▸ hs3_raw
+    -- ! Precompute pc for s3.
+    have hpc3eq : s3.pc = pc + compile_len e1_sub + 1 + compile_len e2_sub := by
+      have h : s3.pc = s2.pc + compile_len e2_sub := hpc3
+      rw [h]; show s1.pc + 1 + compile_len e2_sub = _; rw [hpc1]
+    -- ! 5) store .rbx .rax 1 at s3 → s4
+    let s4 : State :=
+      { s3 with
+        pc := s3.pc + 1
+        heap := Heap.ext s3.heap (s3.regs.rbx + 1) s3.regs.rax }
+    have hstore1' : instr_at is s3.pc (.store .rbx .rax 1) := by
+      rw [hpc3eq]; exact hstore1_at_abs
+    have hstep_store1 : Step is s3 s4 :=
+      Step.store (s := s3) (addr := .rbx) (src := .rax) (offset := 1)
+        (a := s3.regs.rbx) (v := s3.regs.rax) hstore1' rfl rfl
+    -- ! 6) pop .rax at s4 → s5
+    have hstack4 : s4.stack = s1.regs.rax :: (stk ++ k) := by
+      show s3.stack = s1.regs.rax :: (stk ++ k)
+      rw [hstack3]; rfl
+    let s5 : State :=
+      { s4 with
+        pc := s4.pc + 1
+        regs := Reg.write .rax s1.regs.rax s4.regs
+        stack := stk ++ k }
+    have hpop' : instr_at is s4.pc (.pop .rax) := by
+      show instr_at is (s3.pc + 1) (.pop .rax)
+      rw [hpc3eq]; exact hpop_at_abs
+    have hstep_pop : Step is s4 s5 :=
+      Step.pop (s := s4) (hd := s1.regs.rax) (tl := stk ++ k) hpop' hstack4
+    -- ! 7) store .rbx .rax 0 at s5 → s6
+    let s6 : State :=
+      { s5 with
+        pc := s5.pc + 1
+        heap := Heap.ext s5.heap (s5.regs.rbx + 0) s5.regs.rax }
+    have hstore2' : instr_at is s5.pc (.store .rbx .rax 0) := by
+      show instr_at is (s4.pc + 1) (.store .rbx .rax 0)
+      show instr_at is (s3.pc + 1 + 1) (.store .rbx .rax 0)
+      rw [hpc3eq]; exact hstore2_at_abs
+    have hstep_store2 : Step is s5 s6 :=
+      Step.store (s := s5) (addr := .rbx) (src := .rax) (offset := 0)
+        (a := s5.regs.rbx) (v := s5.regs.rax) hstore2' rfl rfl
+    -- ! 8) movr .rax .rbx at s6 → s7
+    let s7 : State :=
+      { s6 with
+        pc := s6.pc + 1
+        regs := Reg.write .rax (Reg.read .rbx s6.regs) s6.regs }
+    have hmovr' : instr_at is s6.pc (.movr .rax .rbx) := by
+      show instr_at is (s5.pc + 1) (.movr .rax .rbx)
+      show instr_at is (s4.pc + 1 + 1) (.movr .rax .rbx)
+      show instr_at is (s3.pc + 1 + 1 + 1) (.movr .rax .rbx)
+      rw [hpc3eq]; exact hmovr_at_abs
+    have hstep_movr : Step is s6 s7 := Step.movr (s := s6) hmovr'
+    -- ! 9) addi .rbx 2 at s7 → s8
+    let s8 : State :=
+      { s7 with
+        pc := s7.pc + 1
+        regs := Reg.write .rbx (Reg.read .rbx s7.regs + 2) s7.regs }
+    have haddi' : instr_at is s7.pc (.addi .rbx 2) := by
+      show instr_at is (s6.pc + 1) (.addi .rbx 2)
+      show instr_at is (s5.pc + 1 + 1) (.addi .rbx 2)
+      show instr_at is (s4.pc + 1 + 1 + 1) (.addi .rbx 2)
+      show instr_at is (s3.pc + 1 + 1 + 1 + 1) (.addi .rbx 2)
+      rw [hpc3eq]; exact haddi_at_abs
+    have hstep_addi : Step is s7 s8 := Step.addi (s := s7) haddi'
+    -- ! Key auxiliary facts about register/heap shapes.
+    -- ! rbx stays at s3.regs.rbx through s4, s5, s6 (store/pop/store don't touch rbx).
+    have hrbx_s5 : s5.regs.rbx = s3.regs.rbx := by
+      show (Reg.write .rax s1.regs.rax s4.regs).rbx = s3.regs.rbx
+      simp [Reg.write, s4]
+    have hrbx_s6 : s6.regs.rbx = s3.regs.rbx := by
+      show s5.regs.rbx = s3.regs.rbx
+      exact hrbx_s5
+    have hrax_s5 : s5.regs.rax = s1.regs.rax := by
+      show (Reg.write .rax s1.regs.rax s4.regs).rax = s1.regs.rax
+      simp [Reg.write]
+    -- ! Heap progression.
+    have hheap_s4 : s4.heap = Heap.ext s3.heap (s3.regs.rbx + 1) s3.regs.rax := by rfl
+    have hheap_s5 : s5.heap = s4.heap := by rfl
+    have hheap_s6 :
+        s6.heap = Heap.ext s4.heap (s3.regs.rbx + 0) s1.regs.rax := by
+      show Heap.ext s5.heap (s5.regs.rbx + 0) s5.regs.rax =
+           Heap.ext s4.heap (s3.regs.rbx + 0) s1.regs.rax
+      rw [hheap_s5, hrbx_s5, hrax_s5]
+    have hheap_s8 : s8.heap = s6.heap := by rfl
+    -- ! HeapExtends chain s3 → s4 → s6.
+    have hfresh3_at_1 : Heap.lookup s3.heap (s3.regs.rbx + 1) = none := by
+      have h := hfresh3 1
+      simpa using h
+    have hfresh3_at_0 : Heap.lookup s3.heap (s3.regs.rbx + 0) = none := by
+      have h := hfresh3 0
+      simpa using h
+    have hext_s3_s4 : HeapExtends s3.heap s4.heap := by
+      rw [hheap_s4]
+      exact HeapExtends.write hfresh3_at_1
+    have hfresh_s4_at_0 : Heap.lookup s4.heap (s3.regs.rbx + 0) = none := by
+      rw [hheap_s4]
+      have hne : (s3.regs.rbx + 0 : Int) ≠ s3.regs.rbx + 1 := by omega
+      rw [ext_lookup_of_ne hne]
+      exact hfresh3_at_0
+    have hext_s4_s6 : HeapExtends s4.heap s6.heap := by
+      rw [hheap_s6]
+      exact HeapExtends.write hfresh_s4_at_0
+    have hext_s3_s8 : HeapExtends s3.heap s8.heap := by
+      rw [hheap_s8]
+      exact HeapExtends.trans hext_s3_s4 hext_s4_s6
+    -- ! `i1 := s1.regs.rax` represents v1 in s8.heap, via mono through s3 then s8.
+    have hrepr1_s8 : Represents v1_val s1.regs.rax s8.heap :=
+      Represents.mono (Represents.mono hrepr1 hext3) hext_s3_s8
+    -- ! `i2 := s3.regs.rax` represents v2 in s8.heap.
+    have hrepr2_s8 : Represents v2_val s3.regs.rax s8.heap :=
+      Represents.mono hrepr3 hext_s3_s8
+    -- ! Look up the two cells in s8.heap.
+    have hlook0 : Heap.lookup s8.heap (s3.regs.rbx + 0) = some s1.regs.rax := by
+      rw [hheap_s8, hheap_s6]
+      show Heap.lookup (Heap.ext _ (s3.regs.rbx + 0) s1.regs.rax) (s3.regs.rbx + 0)
+           = some s1.regs.rax
+      simp [Heap.lookup, Heap.ext]
+    have hlook1 : Heap.lookup s8.heap (s3.regs.rbx + 1) = some s3.regs.rax := by
+      rw [hheap_s8, hheap_s6, hheap_s4]
+      have hne10 : (s3.regs.rbx + 1 : Int) ≠ s3.regs.rbx + 0 := by omega
+      rw [ext_lookup_of_ne hne10]
+      simp [Heap.lookup, Heap.ext]
+    -- ! Build Represents.pair at the pair address `s3.regs.rbx`.
+    have hpair_at_addr : Represents (.pair v1_val v2_val) s3.regs.rbx s8.heap :=
+      Represents.pair (i1 := s1.regs.rax) (i2 := s3.regs.rax)
+        hrepr1_s8 hrepr2_s8 hlook0 hlook1
+    -- ! s8.regs.rax = s3.regs.rbx (movr rax rbx, addi rbx unchanged for rax).
+    have hrax_s8 : s8.regs.rax = s3.regs.rbx := by
+      show (Reg.write .rbx (Reg.read .rbx s7.regs + 2) s7.regs).rax = s3.regs.rbx
+      show s7.regs.rax = s3.regs.rbx
+      show (Reg.write .rax (Reg.read .rbx s6.regs) s6.regs).rax = s3.regs.rbx
+      show Reg.read .rbx s6.regs = s3.regs.rbx
+      show s6.regs.rbx = s3.regs.rbx
+      exact hrbx_s6
+    -- ! s8.regs.rbx = s3.regs.rbx + 2 (the post-allocation bump).
+    have hrbx_s8 : s8.regs.rbx = s3.regs.rbx + 2 := by
+      show (Reg.write .rbx (Reg.read .rbx s7.regs + 2) s7.regs).rbx = s3.regs.rbx + 2
+      show Reg.read .rbx s7.regs + 2 = s3.regs.rbx + 2
+      show s7.regs.rbx + 2 = s3.regs.rbx + 2
+      show (Reg.write .rax (Reg.read .rbx s6.regs) s6.regs).rbx + 2 = s3.regs.rbx + 2
+      show s6.regs.rbx + 2 = s3.regs.rbx + 2
+      rw [hrbx_s6]
+    refine ⟨s8, ?_, ?_, ?_⟩
+    · -- ! Chain: initial →* s1 (IH1), s1 → s2 (push), s2 →* s3 (IH2),
+      -- ! then s3 → s4 → s5 → s6 → s7 → s8 (the five-instruction tail).
+      have h_s1_to_s2 : Steps is s1 s2 := Steps.trans Steps.refl hstep_push
+      have h_s1_to_s3 : Steps is s1 s3 := Steps.append h_s1_to_s2 hs2_to_s3
+      have h_s1_to_s4 : Steps is s1 s4 := Steps.trans h_s1_to_s3 hstep_store1
+      have h_s1_to_s5 : Steps is s1 s5 := Steps.trans h_s1_to_s4 hstep_pop
+      have h_s1_to_s6 : Steps is s1 s6 := Steps.trans h_s1_to_s5 hstep_store2
+      have h_s1_to_s7 : Steps is s1 s7 := Steps.trans h_s1_to_s6 hstep_movr
+      have h_s1_to_s8 : Steps is s1 s8 := Steps.trans h_s1_to_s7 hstep_addi
+      exact Steps.append hs1 h_s1_to_s8
+    · refine ⟨?_, ?_, ?_, ?_⟩
+      · -- ! pc bookkeeping: 6 instrs past pc + L(e1) + L(e2).
+        show s8.pc = pc + compile_len (.pair e1_sub e2_sub)
+        show s7.pc + 1 = _
+        show s6.pc + 1 + 1 = _
+        show s5.pc + 1 + 1 + 1 = _
+        show s4.pc + 1 + 1 + 1 + 1 = _
+        show s3.pc + 1 + 1 + 1 + 1 + 1 = _
+        rw [hpc3eq]
+        simp [compile_len]; omega
+      · -- ! stack restored.
+        show s8.stack = stk ++ k
+        rfl
+      · -- ! rax represents (.pair v1 v2): rewrite rax to the pair address.
+        show Represents (.pair v1_val v2_val) s8.regs.rax s8.heap
+        rw [hrax_s8]
+        exact hpair_at_addr
+      · -- ! heap chain through IH1, IH2, and the two stores.
+        show HeapExtends h s8.heap
+        exact HeapExtends.trans hext1 (HeapExtends.trans hext3 hext_s3_s8)
+    · -- ! FreshFrom: new rbx is `s3.regs.rbx + 2`; heap has two cells past it.
+      show FreshFrom s8.heap s8.regs.rbx
+      rw [hheap_s8, hheap_s6, hheap_s4, hrbx_s8]
+      -- ! Normalize `s3.regs.rbx + 0` to `s3.regs.rbx` so the term matches
+      -- ! `FreshFrom.step`'s output literal form.
+      have heq : (s3.regs.rbx + 0 : Int) = s3.regs.rbx := Int.add_zero _
+      rw [heq]
+      exact FreshFrom.step hfresh3
 
   | fstr _ ih =>
     -- ! `fst e` compiles to `compile e ++ [load rax rax 0]`.

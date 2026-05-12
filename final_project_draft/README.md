@@ -29,7 +29,7 @@ Use this as a lightweight team tracker.
 - [x] Many helper lemmas are proved.
 - [x] `compiler_expr_correct_succ` is proved.
 - [x] `compiler_expr_correct_pred` is proved.
-- [~] `compiler_correct_general` — scaffolded with `induction heval`. Proven cases (13 / 22): `intr`, `nilr`, `boolr`, `varr`, `succr`, `predr`, `negtr`, `negfr`, `plusr`, `timesr`, `fstr`, `sndr`, `bindr`. Remaining (`sorry` with strategy comments): `iftr`, `iffr`, `callr`, `pairr`, `consr`, `isnilt`, `isnilf`. Added helpers: `Represents.int_inv`, `Represents.pair_inv`.
+- [~] `compiler_correct_general` — scaffolded with `induction heval`. Proven cases (16 / 22): `intr`, `nilr`, `boolr`, `varr`, `succr`, `predr`, `negtr`, `negfr`, `plusr`, `timesr`, `fstr`, `sndr`, `bindr`, `pairr`, `iftr`, `iffr`. Remaining (`sorry` with strategy comments): `callr`, `consr`, `isnilt`, `isnilf`. Added helpers: `Represents.int_inv`, `Represents.pair_inv`.
 - [x] `compile_prog_correct` — proved as a corollary of `compiler_correct_general` (uses the leading `.jmp`, then chains via `Steps.append`).
 
 ### Part 2: List Feature Design
