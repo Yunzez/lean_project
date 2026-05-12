@@ -224,6 +224,9 @@ inductive Expr where
   | pair (e1 e2 : Expr) : Expr
   | fst (e : Expr) : Expr
   | snd (e : Expr) : Expr
+  | nil : Expr
+  | cons (e1 e2 : Expr) : Expr
+  | is_nil (e : Expr) : Expr
 
 inductive Defn where
   | defn (f x : Var) (e : Expr)
@@ -232,6 +235,7 @@ inductive Val where
   | int (i : Int) : Val
   | bool (b : Bool) : Val
   | pair (v1 v2 : Val) : Val
+  | nil : Val
 
 abbrev Env := List (Var × Val)
 
@@ -304,7 +308,18 @@ inductive Eval : Defns -> Env -> Expr -> Val -> Prop where
   | sndr {ds r e v1 v2} :
     Eval ds r e (.pair v1 v2) ->
     Eval ds r (.snd e) v2
-
+  | nilr {ds r} :
+    Eval ds r (.nil) (.nil)
+  | consr {ds r e1 v1 e2 v2} :
+    Eval ds r e1 v1 ->
+    Eval ds r e2 v2 ->
+    Eval ds r (.cons e1 e2) (.pair v1 v2)
+  | isnilt {ds r e} :
+    Eval ds r e .nil ->
+    Eval ds r (.is_nil e) (.bool true)
+  | isnilf {ds r e v1 v2} :
+    Eval ds r e (.pair v1 v2) ->
+    Eval ds r (.is_nil e) (.bool false)
 
 -- compiler
 
@@ -344,6 +359,9 @@ def compile_len (e : Expr) : Nat :=
     compile_len e1 + compile_len e2 + 6
   | .call _ e =>
     compile_len e + 6
+  | .nil => 1
+  | .cons e1 e2 => compile_len e1 + compile_len e2 + 6
+  | .is_nil e => compile_len e + 3
 
 def compile_defn_len (d : Defn) : Nat :=
   match d with
@@ -435,6 +453,19 @@ def compile (ds : Defns) (c : CEnv) (e : Expr) : List Instr :=
        | none => .halt
        | some i => .movi .r9 i,
       .jmpabs .r9]
+  | .nil => [.movi .rax 0]
+  | .cons e1 e2 =>
+    compile ds c e1 ++
+    [.push .rax] ++
+    compile ds (none :: c) e2 ++
+    [.store .rbx .rax 1,
+     .pop .rax,
+     .store .rbx .rax 0,
+     .movr .rax .rbx,
+     .addi .rbx 2]
+  | .is_nil e =>
+    compile ds c e ++
+    [.movi .r9 0, .cmp .rax .r9, .movi .rax 0]
 
 def compile_defn (ds : Defns) (d : Defn) : List Instr :=
   match d with
@@ -462,6 +493,7 @@ def compile_prog (ds : Defns) (e : Expr) : List Instr :=
 inductive Represents : Val -> Int -> Heap -> Prop where
   | int {i h} : Represents (.int i) i h
   | bool {b h} : Represents (.bool b) (if b then 1 else 0) h
+  | nil {h} : Represents .nil 0 h  -- added this line for nil
   | pair {v1 i1 h v2 i2 i} :
     Represents v1 i1 h ->
     Represents v2 i2 h ->
@@ -678,6 +710,8 @@ theorem Represents.mono {v i h h'} :
     exact .int
   | bool =>
     exact .bool
+  | nil =>
+    exact .nil -- added this line to handle nil
   | pair h1 h2 hlook1 hlook2 ih1 ih2 =>
     exact .pair (ih1 hext) (ih2 hext) (hext _ _ hlook1) (hext _ _ hlook2)
 
@@ -763,6 +797,12 @@ theorem compile_length (ds : Defns) (c : CEnv) (e : Expr) :
   | fst e ih =>
     simp [compile, compile_len, ih, List.length_append]
   | snd e ih =>
+    simp [compile, compile_len, ih, List.length_append]
+  | nil =>
+    simp [compile, compile_len]
+  | cons e1 e2 ih1 ih2 =>
+    simp [compile, compile_len, ih1, ih2, List.length_append, Nat.add_assoc, Nat.add_left_comm, Nat.add_comm]
+  | is_nil e ih =>
     simp [compile, compile_len, ih, List.length_append]
 
 -- ! A compiled function body has the expected fixed extra instructions at the end.
@@ -999,6 +1039,25 @@ theorem compiler_expr_correct_succ
 -- ! This is the main simulation theorem:
 -- ! if the source expression evaluates to `v`, then the compiled code
 -- ! takes a related machine state to a state representing `v`.
+-- theorem compiler_correct_general
+--     {ds c r e v is pc stk k rs zf h}
+--     (hdefs : defns_in_place is ds)
+--     (hcode : code_at is pc (compile ds c e))
+--     (hrel : Related stk c r h)
+--     (heval : Eval ds r e v)
+--     (hfresh : FreshFrom h rs.rbx) :
+--     ∃ s',
+--       Steps is { pc := pc, regs := rs, stack := stk ++ k, zf := zf, heap := h } s' ∧
+--       ExprPost e pc stk k h v s' ∧
+--       FreshFrom s'.heap s'.regs.rbx := by
+--   sorry
+
+
+
+
+-- ! This is the main simulation theorem:
+-- ! if the source expression evaluates to `v`, then the compiled code
+-- ! takes a related machine state to a state representing `v`.
 theorem compiler_correct_general
     {ds c r e v is pc stk k rs zf h}
     (hdefs : defns_in_place is ds)
@@ -1010,11 +1069,87 @@ theorem compiler_correct_general
       Steps is { pc := pc, regs := rs, stack := stk ++ k, zf := zf, heap := h } s' ∧
       ExprPost e pc stk k h v s' ∧
       FreshFrom s'.heap s'.regs.rbx := by
-  sorry
+  induction heval generalizing pc stk rs zf h k with
 
+  | intr i =>
+    let s' : State := { pc := pc + 1, regs := Reg.write .rax i rs, stack := stk ++ k, zf := zf, heap := h }
+    refine ⟨s', ?_, ⟨?_, ?_, ?_, ?_⟩, hfresh⟩
+    · apply Steps.trans Steps.refl
+      apply Step.movi (s := { pc := pc, regs := rs, stack := stk ++ k, zf := zf, heap := h })
+      exact code_at_head hcode
+    · rfl
+    · rfl
+    · exact Represents.int
+    · exact HeapExtends.refl
 
+  | nilr =>
+    let s' : State := {
+      pc := pc + 1,
+      regs := Reg.write .rax 0 rs,
+      stack := stk ++ k,
+      zf := zf,
+      heap := h
+    }
+    refine ⟨s', ?_, ?_, hfresh⟩
+    · apply Steps.trans Steps.refl
+      apply Step.movi
+        (s := {
+          pc := pc,
+          regs := rs,
+          stack := stk ++ k,
+          zf := zf,
+          heap := h
+        })
+      exact code_at_head hcode
+    · refine ⟨?_, ?_, ?_, ?_⟩
+      · simp [s', compile_len]
+      · rfl
+      · exact Represents.nil
+      · exact HeapExtends.refl
 
+  | boolr b =>
+    let s' : State := {
+      pc := pc + 1,
+      regs := Reg.write .rax (if b then 1 else 0) rs,
+      stack := stk ++ k,
+      zf := zf,
+      heap := h
+    }
+    refine ⟨s', ?_, ?_, hfresh⟩
+    · apply Steps.trans Steps.refl
+      apply Step.movi
+        (s := {
+          pc := pc,
+          regs := rs,
+          stack := stk ++ k,
+          zf := zf,
+          heap := h
+        })
 
+      exact code_at_head hcode
+    · refine ⟨?_, ?_, ?_, ?_⟩
+      · simp [s', compile_len]
+      · rfl
+      · exact Represents.bool
+      · exact HeapExtends.refl
+
+  | succr _ ih => sorry
+  | plusr _ ih => sorry
+  | predr _ ih => sorry
+  | timesr _ _ ih1 ih2 => sorry
+  | iftr _ _ ih1 ih2 => sorry
+  | iffr _ _ ih1 ih2 => sorry
+  | negtr _ ih => sorry
+  | negfr _ ih => sorry
+  | varr _ => sorry
+  | bindr _ _ ih1 ih2 => sorry
+  | callr _ _ _ ih1 ih2 => sorry
+  | pairr _ _ ih1 ih2 => sorry
+  | fstr _ ih => sorry
+  | sndr _ ih => sorry
+  | consr _ _ ih1 ih2 => sorry
+  | isnilt _ ih => sorry
+  | isnilf _ ih => sorry
 
 
 
