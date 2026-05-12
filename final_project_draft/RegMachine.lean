@@ -412,7 +412,7 @@ def compile_len (e : Expr) : Nat :=
     compile_len e + 6
   | .nil => 1
   | .cons e1 e2 => compile_len e1 + compile_len e2 + 6
-  | .is_nil e => compile_len e + 3
+  | .is_nil e => compile_len e + 5
 
 def compile_defn_len (d : Defn) : Nat :=
   match d with
@@ -514,9 +514,17 @@ def compile (ds : Defns) (c : CEnv) (e : Expr) : List Instr :=
      .store .rbx .rax 0,
      .movr .rax .rbx,
      .addi .rbx 2]
+  -- | .is_nil e =>
+  --   compile ds c e ++
+  --   [.movi .r9 0, .cmp .rax .r9, .movi .rax 0]
   | .is_nil e =>
     compile ds c e ++
-    [.movi .r9 0, .cmp .rax .r9, .movi .rax 0]
+    [ .movi .r9 0,
+      .cmp .rax .r9,
+      .movi .rax 1,   -- temp set to "true"
+      .bnz 1,         -- if rax not 0, skip next instr
+      .movi .rax 0    -- set to "false"
+    ]
 
 def compile_defn (ds : Defns) (d : Defn) : List Instr :=
   match d with
@@ -824,6 +832,11 @@ theorem Represents.pair_inv {v1 v2 i h} :
   | pair h1 h2 l1 l2 =>
     rename_i i1 i2
     exact ⟨i1, i2, h1, h2, l1, l2⟩
+
+-- ! Inversion helper for `is_nil`
+theorem Represents.nil_inv {i h} :
+  Represents .nil i h -> i = 0 := by
+  intro h; cases h; rfl
 
 theorem Related.mono {s c r h h'} :
   Related s c r h ->
