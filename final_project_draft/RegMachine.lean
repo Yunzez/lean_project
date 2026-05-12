@@ -1056,6 +1056,20 @@ theorem code_at_after_compile_prefix
     simp [compile_length]
   simpa [hlen, Nat.add_assoc] using htail
 
+theorem code_at_after_two_compiles {ds c e1 e2 is pc pfx1 pfx2 mid sfx} :
+  code_at is pc (compile ds c e1 ++ pfx1 ++ compile ds (none :: c) e2 ++ pfx2 ++ mid ++ sfx) ->
+  code_at is (pc + compile_len e1 + pfx1.length + compile_len e2 + pfx2.length) mid := by
+  intro h
+  have h1 : code_at is (pc + compile_len e1 + pfx1.length) (compile ds (none :: c) e2 ++ pfx2 ++ mid) := by
+    have h_split : code_at is pc (compile ds c e1 ++ pfx1 ++ (compile ds (none :: c) e2 ++ pfx2 ++ mid) ++ sfx) := by
+      simpa [List.append_assoc] using h
+    apply code_at_after_compile_prefix h_split
+  have h2 : code_at is (pc + compile_len e1 + pfx1.length + compile_len e2 + pfx2.length) mid := by
+    have h_split2 : code_at is (pc + compile_len e1 + pfx1.length) (compile ds (none :: c) e2 ++ pfx2 ++ mid ++ []) := by
+      simpa using h1
+    apply code_at_after_compile_prefix h_split2
+  simpa [Nat.add_assoc] using h2
+
 theorem code_at_nil {is : List Instr} {pc : Nat} {code : List Instr} :
   code_at is pc code ->
   code_at is pc [] := by
