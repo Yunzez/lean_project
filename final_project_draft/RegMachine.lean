@@ -1036,6 +1036,68 @@ theorem compiler_expr_correct_succ
               simpa [s2, hrepr_int, Reg.read, Reg.write] using (Represents.int (i := i + 1) (h := s1.heap))
             · exact hext1
 
+theorem compiler_expr_correct_pred
+    {ds c e i is pc stk k rs zf h}
+    (hcode : code_at is pc (compile ds c (.pred e)))
+    (hih :
+      ∃ s',
+        Steps is { pc := pc, regs := rs, stack := stk ++ k, zf := zf, heap := h } s' ∧
+        ExprPost e pc stk k h (.int i) s' ∧
+        FreshFrom s'.heap s'.regs.rbx) :
+    ∃ s',
+      Steps is { pc := pc, regs := rs, stack := stk ++ k, zf := zf, heap := h } s' ∧
+      ExprPost (.pred e) pc stk k h (.int (i - 1)) s' ∧
+      FreshFrom s'.heap s'.regs.rbx := by
+  rcases hih with ⟨s1, hs1, hpost1, hfresh1⟩
+  rcases hpost1 with ⟨hpc1, hstack1, hrepr1, hext1⟩
+  have hcode_e : code_at is pc (compile ds c e) := by
+    exact code_at_compile_left
+      (tail := [.addi Reg.rax (-1)])
+      hcode
+  have haddi :
+      instr_at is (pc + compile_len e) (.addi Reg.rax (-1)) := by
+    have hmid :
+        code_at is (pc + compile_len e)
+          [.addi Reg.rax (-1)] := by
+      simpa using
+        (code_at_after_compile_prefix
+          (ds := ds)
+          (c := c)
+          (e := e)
+          (is := is)
+          (pc := pc)
+          (pfx := [])
+          (mid := [.addi Reg.rax (-1)])
+          (sfx := [])
+          (by simpa [compile] using hcode))
+    exact code_at_head hmid
+  have hrepr_int : s1.regs.rax = i := by
+    cases hrepr1 with
+    | int =>
+      rfl
+  let s2 : State :=
+    { s1 with
+      pc := s1.pc + 1
+      regs := Reg.write Reg.rax
+        (Reg.read Reg.rax s1.regs - 1)
+        s1.regs }
+  refine ⟨s2, ?_, ?_, hfresh1⟩
+  · have haddi' :
+        instr_at is s1.pc (.addi .rax (-1)) := by
+      simpa [hpc1] using haddi
+    exact
+      Steps.trans
+        hs1
+        (Step.addi (s := s1) haddi')
+  · constructor
+    · simp [s2, hpc1, compile_len, Nat.add_assoc]
+    · constructor
+      · simp [s2, hstack1]
+      · constructor
+        ·
+          simpa [s2, hrepr_int, Reg.read, Reg.write] using (Represents.int (i := i - 1) (h := s1.heap))
+        · exact hext1
+
 -- ! This is the main simulation theorem:
 -- ! if the source expression evaluates to `v`, then the compiled code
 -- ! takes a related machine state to a state representing `v`.
@@ -1125,7 +1187,6 @@ theorem compiler_correct_general
           zf := zf,
           heap := h
         })
-
       exact code_at_head hcode
     · refine ⟨?_, ?_, ?_, ?_⟩
       · simp [s', compile_len]
@@ -1133,7 +1194,45 @@ theorem compiler_correct_general
       · exact Represents.bool
       · exact HeapExtends.refl
 
+  | varr hlook =>
+    rename_i r v x
+    rcases Related.lookup hrel hlook with
+      ⟨n, i, hcenv, hstackget, hrep⟩
+    have hcode_var :
+        compile ds c (.var x) = [.stackget .rax n] := by
+      simp [compile]
+      rw [hcenv]
+    have hcode_at :
+        code_at is pc ([.stackget .rax n]) := by
+      simpa [hcode_var] using hcode
+    have hinst :
+        instr_at is pc (.stackget .rax n) := by
+      exact code_at_head hcode_at
+    have hget : get stk n i :=
+      get_of_getElem? hstackget
+    let s' : State := {
+      pc := pc + 1,
+      regs := Reg.write .rax i rs,
+      stack := stk ++ k,
+      zf := zf,
+      heap := h
+    }
+    refine ⟨s', ?_, ?_, hfresh⟩
+    · exact
+        Steps.trans
+          Steps.refl
+          (Step.stackget hinst (get_append_left hget))
+    · constructor
+      · simp [s', compile_len]
+      · constructor
+        · rfl
+        · constructor
+          · exact hrep
+          · exact HeapExtends.refl
+
   | succr _ ih => sorry
+  -- | predr hev ih =>
+  -- -- exact compiler_expr_correct_pred hcode (ih hdefs hcode hrel hfresh)
   | plusr _ ih => sorry
   | predr _ ih => sorry
   | timesr _ _ ih1 ih2 => sorry
@@ -1141,7 +1240,6 @@ theorem compiler_correct_general
   | iffr _ _ ih1 ih2 => sorry
   | negtr _ ih => sorry
   | negfr _ ih => sorry
-  | varr _ => sorry
   | bindr _ _ ih1 ih2 => sorry
   | callr _ _ _ ih1 ih2 => sorry
   | pairr _ _ ih1 ih2 => sorry
