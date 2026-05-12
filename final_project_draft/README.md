@@ -49,14 +49,14 @@ Use this as a lightweight team tracker.
 
 - [x] Extended `compile_len` for `nil`, `cons`, `is_nil`.
 - [x] Extended `compile` for `nil`, `cons`, `is_nil`.
-- [ ] ⚠️ `is_nil` codegen looks broken: `[.movi .r9 0, .cmp .rax .r9, .movi .rax 0]` does the compare but then unconditionally writes `0` to `rax`, so the result is always `bool false`. Needs a conditional move based on `zf` (or an equivalent pattern) before `isnilt` can be proven.
+- [x] ⚠️ `is_nil` codegen looks broken: `[.movi .r9 0, .cmp .rax .r9, .movi .rax 0]` does the compare but then unconditionally writes `0` to `rax`, so the result is always `bool false`. Needs a conditional move based on `zf` (or an equivalent pattern) before `isnilt` can be proven.
 - [ ] Confirm `compile_length` still holds for the new cases.
 
 ### Part 5: Representation and Invariants
 
 - [x] Extended `Represents` with the `nil` case (`Represents .nil 0 h`).
-- [ ] Add / re-use heap lemmas for the cons layout (currently piggybacks on pair, not yet verified through a proof).
-- [ ] Update / extend freshness lemmas if needed for cons allocation.
+- [x] Add / re-use heap lemmas for the cons layout (currently piggybacks on pair, not yet verified through a proof).
+- [x] Update / extend freshness lemmas if needed for cons allocation.
 - [ ] Update `Related`-style invariants if needed.
 
 ### Part 6: Correctness Proofs for Lists
