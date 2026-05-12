@@ -515,12 +515,22 @@ def compile (ds : Defns) (c : CEnv) (e : Expr) : List Instr :=
      .movr .rax .rbx,
      .addi .rbx 2]
   | .is_nil e =>
+    -- yunze: two bugs in the prior version:
+    --   (1) `.bnz 1` is a no-op — `Step.bnzf` already sets pc := s.pc + 1,
+    --       so both branch-taken and fallthrough land at pc+1.
+    --   (2) Even with `.bnz 2` the semantics were inverted: bnz fires on
+    --       `zf = false` (rax ≠ 0, i.e. pair), so the branch *taken* path
+    --       must be the pair (false) answer, not the nil (true) answer.
+    -- Fix: swap the two `movi` constants. After `cmp`, set rax to the
+    -- *false* answer (0) as default; on `zf = false` (pair) the bnz skips
+    -- past the trailing `movi rax 1` so rax stays 0; on `zf = true` (nil)
+    -- the bnzf falls through and `movi rax 1` overwrites rax to true.
     compile ds c e ++
     [ .movi .r9 0,
       .cmp .rax .r9,
-      .movi .rax 1,   -- temp set to "true"
-      .bnz 1,         -- if rax not 0, skip next instr
-      .movi .rax 0    -- set to "false"
+      .movi .rax 0,   -- default: false  (pair answer)
+      .bnz 2,         -- if rax was non-zero (pair), skip the `movi rax 1`
+      .movi .rax 1    -- nil case: set to true
     ]
 
 def compile_defn (ds : Defns) (d : Defn) : List Instr :=
@@ -557,11 +567,15 @@ inductive Represents : Val -> Int -> Heap -> Prop where
   | int {i h} : Represents (.int i) i h
   | bool {b h} : Represents (.bool b) (if b then 1 else 0) h
   | nil {h} : Represents .nil 0 h  -- added this line for nil
+  -- yunze: added `i ≥ 1` premise. This rules out pair-address 0, which would
+  -- otherwise collide with the nil encoding and break `is_nil` for pairs
+  -- allocated at address 0.
   | pair {v1 i1 h v2 i2 i} :
     Represents v1 i1 h ->
     Represents v2 i2 h ->
     Heap.lookup h (i+0) = some i1 -> -- added "some" here to ensure "some" is used for Option
     Heap.lookup h (i+1) = some i2 -> -- added "some" here to ensure "some" is used for Option
+    i ≥ 1 ->
     Represents (.pair v1 v2) i h
 
 inductive Related : Stack -> CEnv -> Env -> Heap -> Prop where
@@ -733,28 +747,39 @@ theorem lookup_some_mem_dom {h : Heap} {a v : Int} :
       have hmem : a ∈ dom h := ih this
       simpa [dom] using List.mem_cons_of_mem j hmem
 
-def FreshFrom (h : Heap) (a : Int) : Prop :=
-  ∀ k : Nat, Heap.lookup h (a + k) = none
+-- yunze: strengthened FreshFrom to also require `a ≥ 1`. This is the
+-- invariant that unblocks the `isnilf` case: when we compare a pair address
+-- against `0`, we need to know the address is non-zero. We carry the
+-- positivity through the simulation alongside the existing freshness facts.
+structure FreshFrom (h : Heap) (a : Int) : Prop where
+  pos    : a ≥ 1
+  lookup : ∀ k : Nat, Heap.lookup h (a + k) = none
 
 theorem exists_freshFrom (h : Heap) :
   ∃ a : Int, FreshFrom h a := by
   let M : Nat := maxAbsIntList (dom h)
-  refine ⟨Int.ofNat (M + 1), ?_⟩
-  intro k
-  cases hL : Heap.lookup h (Int.ofNat (M + 1) + Int.ofNat k) with
-  | none =>
-    rfl
-  | some v =>
-    have hmem : (Int.ofNat (M + 1) + Int.ofNat k) ∈ dom h :=
-      lookup_some_mem_dom (by simpa [hL])
-    have hbound : Int.natAbs (Int.ofNat (M + 1) + Int.ofNat k) ≤ M := by
-      simpa [M] using natAbs_le_maxAbsIntList_of_mem hmem
-    have hadd : Int.ofNat (M + 1) + Int.ofNat k = Int.ofNat (M + 1 + k) := by
-      simpa [Nat.add_assoc] using (Int.ofNat_add_ofNat (M + 1) k)
-    have hbad : M + 1 + k ≤ M := by
-      simpa [hadd] using hbound
-    have : M + 1 ≤ M := Nat.le_trans (Nat.le_add_right (M + 1) k) hbad
-    exact (Nat.not_succ_le_self M this).elim
+  refine ⟨Int.ofNat (M + 1), ?_, ?_⟩
+  -- yunze: pos field — `Int.ofNat (M + 1) ≥ 1` since `M + 1 ≥ 1`.
+  · show (Int.ofNat (M + 1) : Int) ≥ 1
+    have h1 : (1 : Nat) ≤ M + 1 := Nat.succ_le_succ (Nat.zero_le M)
+    have : (Int.ofNat 1 : Int) ≤ Int.ofNat (M + 1) := Int.ofNat_le.mpr h1
+    simpa using this
+  -- ! lookup field — the original freshness proof.
+  · intro k
+    cases hL : Heap.lookup h (Int.ofNat (M + 1) + Int.ofNat k) with
+    | none =>
+      rfl
+    | some v =>
+      have hmem : (Int.ofNat (M + 1) + Int.ofNat k) ∈ dom h :=
+        lookup_some_mem_dom (by simpa [hL])
+      have hbound : Int.natAbs (Int.ofNat (M + 1) + Int.ofNat k) ≤ M := by
+        simpa [M] using natAbs_le_maxAbsIntList_of_mem hmem
+      have hadd : Int.ofNat (M + 1) + Int.ofNat k = Int.ofNat (M + 1 + k) := by
+        simpa [Nat.add_assoc] using (Int.ofNat_add_ofNat (M + 1) k)
+      have hbad : M + 1 + k ≤ M := by
+        simpa [hadd] using hbound
+      have : M + 1 ≤ M := Nat.le_trans (Nat.le_add_right (M + 1) k) hbad
+      exact (Nat.not_succ_le_self M this).elim
 
 def HeapExtends (h h' : Heap) : Prop :=
   ∀ a v, Heap.lookup h a = some v -> Heap.lookup h' a = some v
@@ -792,8 +817,9 @@ theorem Represents.mono {v i h h'} :
     exact .bool
   | nil =>
     exact .nil
-  | pair h1 h2 hlook1 hlook2 ih1 ih2 =>
-    exact .pair (ih1 hext) (ih2 hext) (hext _ _ hlook1) (hext _ _ hlook2)
+  | pair h1 h2 hlook1 hlook2 hpos ih1 ih2 =>
+    -- yunze: thread the new `i ≥ 1` field through mono.
+    exact .pair (ih1 hext) (ih2 hext) (hext _ _ hlook1) (hext _ _ hlook2) hpos
 
 theorem Represents.bool_inv {b i h} :
   Represents (.bool b) i h ->
@@ -826,18 +852,22 @@ theorem Represents.int_inv {i j h} :
 -- ! Inversion helper for `pair`: same motivation as `int_inv` /`bool_inv` —
 -- ! when the address `i` is a projection like `s.regs.rax`, we cannot `cases`
 -- ! the hypothesis directly. This lemma packages the four pieces explicitly.
+-- yunze: extended `pair_inv` to also expose the new `i ≥ 1` premise as the
+-- final existential conjunct. Use sites that don't need it can ignore it
+-- with `_`.
 theorem Represents.pair_inv {v1 v2 i h} :
   Represents (.pair v1 v2) i h ->
   ∃ i1 i2,
     Represents v1 i1 h ∧
     Represents v2 i2 h ∧
     Heap.lookup h (i+0) = some i1 ∧
-    Heap.lookup h (i+1) = some i2 := by
+    Heap.lookup h (i+1) = some i2 ∧
+    i ≥ 1 := by
   intro hrep
   cases hrep with
-  | pair h1 h2 l1 l2 =>
+  | pair h1 h2 l1 l2 hpos =>
     rename_i i1 i2
-    exact ⟨i1, i2, h1, h2, l1, l2⟩
+    exact ⟨i1, i2, h1, h2, l1, l2, hpos⟩
 
 -- ! Inversion helper for `is_nil`
 theorem Represents.nil_inv {i h} :
@@ -846,6 +876,8 @@ theorem Represents.nil_inv {i h} :
 
 -- Lemma verifies that if we store two values at b and b+1
 -- Represent a pair/cons at address b
+-- yunze: switched the freshness uses to `.lookup` projections (FreshFrom is now
+-- a structure), and supplied the new `b ≥ 1` constructor field from `h_fresh.pos`.
 theorem Represents.cons {h : Heap} {v1 v2 : Val} {i1 i2 b : Int}
   (h_fresh : FreshFrom h b)
   (h1 : Represents v1 i1 h)
@@ -857,28 +889,30 @@ theorem Represents.cons {h : Heap} {v1 v2 : Val} {i1 i2 b : Int}
   · apply Represents.mono h1
     apply HeapExtends.trans (h' := h_mid)
     · apply HeapExtends.write
-      have hf1 := h_fresh 1
+      have hf1 := h_fresh.lookup 1
       simpa using hf1
     · apply HeapExtends.write
       simp [h_mid, Heap.lookup, Heap.ext]
       have hne : b ≠ b + 1 := by omega
       simp [hne]
-      have hf0 := h_fresh 0
+      have hf0 := h_fresh.lookup 0
       simpa using hf0
   · apply Represents.mono h2
     apply HeapExtends.trans (h' := h_mid)
     · apply HeapExtends.write
-      have hf1 := h_fresh 1
+      have hf1 := h_fresh.lookup 1
       simpa using hf1
     · apply HeapExtends.write
       simp [h_mid, Heap.lookup, Heap.ext]
       have hne : b ≠ b + 1 := by omega
       simp [hne]
-      have hf0 := h_fresh 0
+      have hf0 := h_fresh.lookup 0
       simpa using hf0
   · simp [Heap.lookup, Heap.ext]
   · have h_ne : b + 1 ≠ b := by omega
     simp [Heap.lookup, Heap.ext, h_ne]
+  · -- yunze: new `b ≥ 1` field on Represents.pair, supplied from h_fresh.pos.
+    exact h_fresh.pos
 
 theorem Related.mono {s c r h h'} :
   Related s c r h ->
@@ -927,17 +961,23 @@ theorem FreshFrom.step {h : Heap} {a i1 i2 : Int} :
   FreshFrom h a ->
   FreshFrom ((h.ext (a + 1) i2).ext a i1) (a + 2) := by
   intro hfresh
-  intro k
-  -- ? Expand the two heap writes and check the queried address is not `a`.
-  have hne1 : a + 2 + k ≠ a := by
+  refine ⟨?_, ?_⟩
+  -- yunze: pos field — `a ≥ 1` implies `a + 2 ≥ 3 ≥ 1`.
+  · have hpos : a ≥ 1 := hfresh.pos
+    show a + 2 ≥ 1
     omega
-  -- ? Check it is also not `a + 1`.
-  have hne2 : a + 2 + k ≠ a + 1 := by
-    omega
-  rw [ext_lookup_of_ne hne1, ext_lookup_of_ne hne2]
-  -- ? Now we can use the original freshness from `a`.
-  have := hfresh (k + 2)
-  simpa [Int.add_assoc, Int.add_left_comm, Int.add_comm] using this
+  -- ! lookup field — original argument.
+  · intro k
+    -- ? Expand the two heap writes and check the queried address is not `a`.
+    have hne1 : a + 2 + k ≠ a := by
+      omega
+    -- ? Check it is also not `a + 1`.
+    have hne2 : a + 2 + k ≠ a + 1 := by
+      omega
+    rw [ext_lookup_of_ne hne1, ext_lookup_of_ne hne2]
+    -- ? Now we can use the original freshness from `a`.
+    have := hfresh.lookup (k + 2)
+    simpa [Int.add_assoc, Int.add_left_comm, Int.add_comm] using this
 
 -- ! The compiler always produces exactly `compile_len e` instructions.
 theorem compile_length (ds : Defns) (c : CEnv) (e : Expr) :
@@ -1064,6 +1104,7 @@ theorem code_at_compile_left {ds : Defns} {c : CEnv} {e : Expr} {is : List Instr
   intro hcode
   exact code_at_app_left (c2 := tail) hcode
 
+-- ? super helpful
 theorem code_at_after_compile_prefix
     {ds : Defns} {c : CEnv} {e : Expr} {is : List Instr} {pc : Nat}
     {pfx : List Instr} {mid : List Instr} {sfx : List Instr} :
@@ -2486,16 +2527,360 @@ theorem compiler_correct_general
         simp [Reg.write]
       rw [hheap, hrbx]; exact hfresh3
 
-  | callr _ _ _ ih1 ih2 =>
-    -- ! `call f e` is the trickiest case. Outline:
-    -- !   1. IH1 evaluates the argument into rax.
-    -- !   2. movpc r9 ; addi r9 5 ; push r9 ; push rax: save return pc, push arg.
-    -- !   3. movi r9 (entry of f) ; jmpabs r9 lands us at the function body.
-    -- !   4. The body is `compile ds [(some x)] e'`; apply IH2 on a Related with
-    -- !      a fresh single-bind frame (`Related.bind` from `Related.mt`).
-    -- !   5. After the body, a `ret`-style sequence brings us back to the caller.
-    -- ! Will likely want a separate `compiler_expr_correct_call` helper.
-    sorry
+  | callr _hev_arg hlook _hev_body ih1 ih2 =>
+    -- ! yunze: full proof of the call case.
+    -- ! Layout: compile e_arg ++ [movpc r9, addi r9 5, push r9, push rax, movi r9 entry, jmpabs r9]
+    -- ! Function body lives at `entry_nat` via `defns_in_place`, followed by
+    -- ! [pop r9, pop r9, jmpabs r9] (discard arg, pop retaddr, return).
+    -- ! Trace: IH1 → s1 (rax = i1 ≈ v1). movpc+addi puts retaddr = pc + L + 6 in r9.
+    -- ! push r9 / push rax leaves stack = [i1, retaddr] ++ caller. movi+jmpabs lands
+    -- ! at entry_nat. IH2 on body → s8 with rax representing v and stack restored.
+    -- ! Two pops + jmpabs return to retaddr = pc + compile_len (.call f e_arg).
+    rename_i r' e_arg v1_val f' x' e_body v_val
+
+    -- ! 0) `hlook` ⇒ `Defns.entry ds f' = some entry_nat`.
+    rcases compile_defns_split hlook with ⟨pre_defs, _post_defs, _hsplit, hentry_eq⟩
+    let entry_nat : Nat := pre_defs.length + 1
+
+    -- ! 1) `defns_in_place` gives us the body code at `entry_nat`.
+    have hdefn_at : code_at is entry_nat (compile_defn ds (.defn f' x' e_body)) := by
+      have h := hdefs hlook
+      rw [hentry_eq] at h
+      simpa using h
+    have hcode_body : code_at is entry_nat (compile ds [some x'] e_body) :=
+      code_at_compile_left
+        (tail := [.pop .r9, .pop .r9, .jmpabs .r9])
+        (by simpa [compile_defn] using hdefn_at)
+    have hreturn_at :
+        code_at is (entry_nat + compile_len e_body)
+          [.pop .r9, .pop .r9, .jmpabs .r9] := by
+      simpa using
+        (code_at_after_compile_prefix
+          (ds := ds) (c := [some x']) (e := e_body) (is := is) (pc := entry_nat)
+          (pfx := []) (mid := [.pop .r9, .pop .r9, .jmpabs .r9]) (sfx := [])
+          (by simpa [compile_defn] using hdefn_at))
+    have hpop1_body_at : instr_at is (entry_nat + compile_len e_body) (.pop .r9) :=
+      code_at_head hreturn_at
+    have hpop2_body_at : instr_at is (entry_nat + compile_len e_body + 1) (.pop .r9) :=
+      code_at_head (code_at_tail hreturn_at)
+    have hjmpabs_body_at : instr_at is (entry_nat + compile_len e_body + 2) (.jmpabs .r9) :=
+      code_at_head (code_at_tail (code_at_tail hreturn_at))
+
+    -- ! 2) Concretize the call codegen by replacing the inner `match` using `hentry_eq`.
+    have hcode' : code_at is pc (
+        compile ds c e_arg ++
+          [.movpc .r9, .addi .r9 5, .push .r9, .push .rax,
+           .movi .r9 (Int.ofNat entry_nat), .jmpabs .r9]) := by
+      have h1 : compile ds c (.call f' e_arg) =
+          compile ds c e_arg ++
+            [.movpc .r9, .addi .r9 5, .push .r9, .push .rax,
+             (match Defns.entry ds f' with | none => Instr.halt | some i => .movi .r9 i),
+             .jmpabs .r9] := rfl
+      rw [h1, hentry_eq] at hcode
+      exact hcode
+
+    -- ! 3) Slice the call code into sub-pieces.
+    have hcode_e_arg : code_at is pc (compile ds c e_arg) :=
+      code_at_compile_left
+        (tail := [.movpc .r9, .addi .r9 5, .push .r9, .push .rax,
+                  .movi .r9 (Int.ofNat entry_nat), .jmpabs .r9])
+        hcode'
+    have htail_at : code_at is (pc + compile_len e_arg)
+        [.movpc .r9, .addi .r9 5, .push .r9, .push .rax,
+         .movi .r9 (Int.ofNat entry_nat), .jmpabs .r9] := by
+      simpa using
+        (code_at_after_compile_prefix
+          (ds := ds) (c := c) (e := e_arg) (is := is) (pc := pc)
+          (pfx := [])
+          (mid := [.movpc .r9, .addi .r9 5, .push .r9, .push .rax,
+                   .movi .r9 (Int.ofNat entry_nat), .jmpabs .r9])
+          (sfx := []) (by simpa using hcode'))
+    have hmovpc_at_abs : instr_at is (pc + compile_len e_arg) (.movpc .r9) :=
+      code_at_head htail_at
+    have haddi_at_abs : instr_at is (pc + compile_len e_arg + 1) (.addi .r9 5) :=
+      code_at_head (code_at_tail htail_at)
+    have hpush_r9_at_abs : instr_at is (pc + compile_len e_arg + 2) (.push .r9) :=
+      code_at_head (code_at_tail (code_at_tail htail_at))
+    have hpush_rax_at_abs : instr_at is (pc + compile_len e_arg + 3) (.push .rax) :=
+      code_at_head (code_at_tail (code_at_tail (code_at_tail htail_at)))
+    have hmovi_at_abs : instr_at is (pc + compile_len e_arg + 4) (.movi .r9 (Int.ofNat entry_nat)) :=
+      code_at_head (code_at_tail (code_at_tail (code_at_tail (code_at_tail htail_at))))
+    have hjmpabs_at_abs : instr_at is (pc + compile_len e_arg + 5) (.jmpabs .r9) :=
+      code_at_head (code_at_tail (code_at_tail (code_at_tail (code_at_tail (code_at_tail htail_at)))))
+
+    -- ! 4) IH1 → s1: argument evaluated, rax = i1 represents v1_val.
+    rcases ih1 hcode_e_arg hrel hfresh with
+      ⟨s1, hs1, ⟨hpc1, hstack1, hrepr1, hext1⟩, hfresh1⟩
+
+    -- ! 5) movpc .r9 at s1 → s2: r9 := s1.pc + 1.
+    let s2 : State :=
+      { pc := s1.pc + 1
+        regs := Reg.write .r9 (Int.ofNat (s1.pc + 1)) s1.regs
+        stack := stk ++ k
+        zf := s1.zf
+        heap := s1.heap }
+    have hmovpc' : instr_at is s1.pc (.movpc .r9) := by
+      simpa [hpc1] using hmovpc_at_abs
+    have hstep_movpc : Step is s1 s2 := by
+      have hraw := Step.movpc (s := s1) hmovpc'
+      simpa [s2, hstack1] using hraw
+
+    -- ! 6) addi .r9 5 at s2 → s3: r9 := s1.pc + 1 + 5 = s1.pc + 6 (the retaddr).
+    let retaddr : Int := Int.ofNat (s1.pc + 1) + 5
+    let s3 : State :=
+      { pc := s2.pc + 1
+        regs := Reg.write .r9 retaddr s2.regs
+        stack := stk ++ k
+        zf := s2.zf
+        heap := s2.heap }
+    have haddi' : instr_at is s2.pc (.addi .r9 5) := by
+      show instr_at is (s1.pc + 1) (.addi .r9 5)
+      have hh : (s1.pc + 1 : Nat) = pc + compile_len e_arg + 1 := by rw [hpc1]
+      rw [hh]; exact haddi_at_abs
+    have hstep_addi : Step is s2 s3 := by
+      have hraw := Step.addi (s := s2) haddi'
+      have hr9_s2 : Reg.read .r9 s2.regs = Int.ofNat (s1.pc + 1) := by
+        show (Reg.write .r9 (Int.ofNat (s1.pc + 1)) s1.regs).r9 = _
+        simp [Reg.write]
+      simpa [s3, retaddr, hr9_s2] using hraw
+
+    -- ! 7) push .r9 at s3 → s4: stack := retaddr :: (stk ++ k).
+    let s4 : State :=
+      { pc := s3.pc + 1
+        regs := s3.regs
+        stack := retaddr :: (stk ++ k)
+        zf := s3.zf
+        heap := s3.heap }
+    have hpush_r9' : instr_at is s3.pc (.push .r9) := by
+      show instr_at is (s2.pc + 1) (.push .r9)
+      show instr_at is (s1.pc + 1 + 1) (.push .r9)
+      have hh : (s1.pc + 1 + 1 : Nat) = pc + compile_len e_arg + 2 := by rw [hpc1]
+      rw [hh]; exact hpush_r9_at_abs
+    have hstep_push_r9 : Step is s3 s4 := by
+      have hraw := Step.push (s := s3) hpush_r9'
+      have hr9_s3 : Reg.read .r9 s3.regs = retaddr := by
+        show (Reg.write .r9 retaddr s2.regs).r9 = _
+        simp [Reg.write]
+      simpa [s4, hr9_s3] using hraw
+
+    -- ! 8) push .rax at s4 → s5: stack := i1 :: retaddr :: (stk ++ k).
+    have hrax_s4 : s4.regs.rax = s1.regs.rax := by
+      show s3.regs.rax = s1.regs.rax
+      show (Reg.write .r9 retaddr s2.regs).rax = s1.regs.rax
+      show s2.regs.rax = s1.regs.rax
+      show (Reg.write .r9 (Int.ofNat (s1.pc + 1)) s1.regs).rax = s1.regs.rax
+      simp [Reg.write]
+    let s5 : State :=
+      { pc := s4.pc + 1
+        regs := s4.regs
+        stack := s1.regs.rax :: retaddr :: (stk ++ k)
+        zf := s4.zf
+        heap := s4.heap }
+    have hpush_rax' : instr_at is s4.pc (.push .rax) := by
+      show instr_at is (s3.pc + 1) (.push .rax)
+      show instr_at is (s2.pc + 1 + 1) (.push .rax)
+      show instr_at is (s1.pc + 1 + 1 + 1) (.push .rax)
+      have hh : (s1.pc + 1 + 1 + 1 : Nat) = pc + compile_len e_arg + 3 := by rw [hpc1]
+      rw [hh]; exact hpush_rax_at_abs
+    have hstep_push_rax : Step is s4 s5 := by
+      have hraw := Step.push (s := s4) hpush_rax'
+      simpa [s5, hrax_s4] using hraw
+
+    -- ! 9) movi .r9 (Int.ofNat entry_nat) at s5 → s6: r9 := entry_nat (as Int).
+    let s6 : State :=
+      { pc := s5.pc + 1
+        regs := Reg.write .r9 (Int.ofNat entry_nat) s5.regs
+        stack := s1.regs.rax :: retaddr :: (stk ++ k)
+        zf := s5.zf
+        heap := s5.heap }
+    have hmovi' : instr_at is s5.pc (.movi .r9 (Int.ofNat entry_nat)) := by
+      show instr_at is (s4.pc + 1) (.movi .r9 (Int.ofNat entry_nat))
+      show instr_at is (s3.pc + 1 + 1) (.movi .r9 (Int.ofNat entry_nat))
+      show instr_at is (s2.pc + 1 + 1 + 1) (.movi .r9 (Int.ofNat entry_nat))
+      show instr_at is (s1.pc + 1 + 1 + 1 + 1) (.movi .r9 (Int.ofNat entry_nat))
+      have hh : (s1.pc + 1 + 1 + 1 + 1 : Nat) = pc + compile_len e_arg + 4 := by rw [hpc1]
+      rw [hh]; exact hmovi_at_abs
+    have hstep_movi : Step is s5 s6 := by
+      have hraw := Step.movi (s := s5) hmovi'
+      simpa [s6] using hraw
+
+    -- ! 10) jmpabs .r9 at s6 → s7: pc := entry_nat.
+    let s7 : State :=
+      { pc := entry_nat
+        regs := s6.regs
+        stack := s1.regs.rax :: retaddr :: (stk ++ k)
+        zf := s6.zf
+        heap := s6.heap }
+    have hjmpabs' : instr_at is s6.pc (.jmpabs .r9) := by
+      show instr_at is (s5.pc + 1) (.jmpabs .r9)
+      show instr_at is (s4.pc + 1 + 1) (.jmpabs .r9)
+      show instr_at is (s3.pc + 1 + 1 + 1) (.jmpabs .r9)
+      show instr_at is (s2.pc + 1 + 1 + 1 + 1) (.jmpabs .r9)
+      show instr_at is (s1.pc + 1 + 1 + 1 + 1 + 1) (.jmpabs .r9)
+      have hh : (s1.pc + 1 + 1 + 1 + 1 + 1 : Nat) = pc + compile_len e_arg + 5 := by rw [hpc1]
+      rw [hh]; exact hjmpabs_at_abs
+    have hstep_jmpabs : Step is s6 s7 := by
+      have hraw := Step.jmpabs (s := s6) (src := .r9) hjmpabs'
+      have hr9_s6 : Reg.read .r9 s6.regs = (Int.ofNat entry_nat : Int) := by
+        show (Reg.write .r9 (Int.ofNat entry_nat) s5.regs).r9 = _
+        simp [Reg.write]
+      have hpc_eq : (Reg.read .r9 s6.regs).toNat = entry_nat := by
+        rw [hr9_s6]; rfl
+      simpa [s7, hpc_eq] using hraw
+
+    -- ! 11) Set up IH2 at s7. Stack form: [i1] ++ (retaddr :: stk ++ k).
+    have hheap_s7 : s7.heap = s1.heap := by
+      show s5.heap = s1.heap
+      show s4.heap = s1.heap
+      show s3.heap = s1.heap
+      show s2.heap = s1.heap
+      rfl
+    have hrbx_s7 : s7.regs.rbx = s1.regs.rbx := by
+      show s6.regs.rbx = s1.regs.rbx
+      show (Reg.write .r9 (Int.ofNat entry_nat) s5.regs).rbx = s1.regs.rbx
+      show s5.regs.rbx = s1.regs.rbx
+      show s4.regs.rbx = s1.regs.rbx
+      show s3.regs.rbx = s1.regs.rbx
+      show (Reg.write .r9 retaddr s2.regs).rbx = s1.regs.rbx
+      show s2.regs.rbx = s1.regs.rbx
+      show (Reg.write .r9 (Int.ofNat (s1.pc + 1)) s1.regs).rbx = s1.regs.rbx
+      simp [Reg.write]
+    have hcode_body_at_s7 : code_at is s7.pc (compile ds [some x'] e_body) := by
+      show code_at is entry_nat (compile ds [some x'] e_body)
+      exact hcode_body
+    have hrel_body : Related [s1.regs.rax] [some x'] [(x', v1_val)] s7.heap := by
+      rw [hheap_s7]
+      exact Related.bind (Related.mt) hrepr1
+    have hfresh_s7 : FreshFrom s7.heap s7.regs.rbx := by
+      rw [hheap_s7, hrbx_s7]
+      exact hfresh1
+
+    -- ! 12) Apply IH2.
+    rcases ih2 (pc := s7.pc) (stk := [s1.regs.rax]) (k := retaddr :: (stk ++ k))
+               (rs := s7.regs) (zf := s7.zf) (h := s7.heap) (c := [some x'])
+               hcode_body_at_s7 hrel_body hfresh_s7 with
+      ⟨s8, hs8_raw, ⟨hpc8, hstack8, hrepr8, hext8⟩, hfresh8⟩
+    -- ! Bridge: IH2's start state matches s7 by definitional equality.
+    have hstart_eq :
+        ({ pc := s7.pc, regs := s7.regs, stack := [s1.regs.rax] ++ (retaddr :: (stk ++ k)),
+           zf := s7.zf, heap := s7.heap } : State) = s7 := by
+      show ({ pc := s7.pc, regs := s7.regs,
+              stack := s1.regs.rax :: retaddr :: (stk ++ k),
+              zf := s7.zf, heap := s7.heap } : State) = s7
+      rfl
+    have hs7_to_s8 : Steps is s7 s8 := hstart_eq ▸ hs8_raw
+
+    -- ! Useful facts after IH2.
+    have hpc8_eq : s8.pc = entry_nat + compile_len e_body := by
+      have h : s8.pc = s7.pc + compile_len e_body := hpc8
+      exact h
+    have hstack8_eq : s8.stack = s1.regs.rax :: retaddr :: (stk ++ k) := by
+      -- ih2 promises stack = [s1.regs.rax] ++ (retaddr :: (stk ++ k)).
+      show s8.stack = _
+      simpa using hstack8
+
+    -- ! 13) pop .r9 at s8 → s9: discard arg, stack := retaddr :: (stk ++ k).
+    let s9 : State :=
+      { pc := s8.pc + 1
+        regs := Reg.write .r9 s1.regs.rax s8.regs
+        stack := retaddr :: (stk ++ k)
+        zf := s8.zf
+        heap := s8.heap }
+    have hpop1' : instr_at is s8.pc (.pop .r9) := by
+      rw [hpc8_eq]; exact hpop1_body_at
+    have hstep_pop1 : Step is s8 s9 :=
+      Step.pop (s := s8) (hd := s1.regs.rax) (tl := retaddr :: (stk ++ k))
+        hpop1' hstack8_eq
+
+    -- ! 14) pop .r9 at s9 → s10: r9 := retaddr, stack := stk ++ k.
+    let s10 : State :=
+      { pc := s9.pc + 1
+        regs := Reg.write .r9 retaddr s9.regs
+        stack := stk ++ k
+        zf := s9.zf
+        heap := s9.heap }
+    have hpop2' : instr_at is s9.pc (.pop .r9) := by
+      show instr_at is (s8.pc + 1) (.pop .r9)
+      rw [hpc8_eq]; exact hpop2_body_at
+    have hstack9 : s9.stack = retaddr :: (stk ++ k) := rfl
+    have hstep_pop2 : Step is s9 s10 :=
+      Step.pop (s := s9) (hd := retaddr) (tl := stk ++ k) hpop2' hstack9
+
+    -- ! 15) jmpabs .r9 at s10 → s11: pc := retaddr.toNat = s1.pc + 6.
+    let s11 : State :=
+      { pc := (s1.pc + 1) + 5
+        regs := s10.regs
+        stack := stk ++ k
+        zf := s10.zf
+        heap := s10.heap }
+    have hjmpabs_ret' : instr_at is s10.pc (.jmpabs .r9) := by
+      show instr_at is (s9.pc + 1) (.jmpabs .r9)
+      show instr_at is (s8.pc + 1 + 1) (.jmpabs .r9)
+      rw [hpc8_eq]; exact hjmpabs_body_at
+    have hstep_jmpabs_ret : Step is s10 s11 := by
+      have hraw := Step.jmpabs (s := s10) (src := .r9) hjmpabs_ret'
+      have hr9_s10 : Reg.read .r9 s10.regs = retaddr := by
+        show (Reg.write .r9 retaddr s9.regs).r9 = _
+        simp [Reg.write]
+      have hpc_eq : (Reg.read .r9 s10.regs).toNat = (s1.pc + 1) + 5 := by
+        rw [hr9_s10]
+        show ((Int.ofNat (s1.pc + 1) + 5 : Int)).toNat = (s1.pc + 1) + 5
+        rfl
+      simpa [s11, hpc_eq] using hraw
+
+    -- ! 16) Package the result.
+    refine ⟨s11, ?_, ?_, ?_⟩
+    · -- ! Chain all steps.
+      have h_s1_to_s2 : Steps is s1 s2 := Steps.trans Steps.refl hstep_movpc
+      have h_s1_to_s3 : Steps is s1 s3 := Steps.trans h_s1_to_s2 hstep_addi
+      have h_s1_to_s4 : Steps is s1 s4 := Steps.trans h_s1_to_s3 hstep_push_r9
+      have h_s1_to_s5 : Steps is s1 s5 := Steps.trans h_s1_to_s4 hstep_push_rax
+      have h_s1_to_s6 : Steps is s1 s6 := Steps.trans h_s1_to_s5 hstep_movi
+      have h_s1_to_s7 : Steps is s1 s7 := Steps.trans h_s1_to_s6 hstep_jmpabs
+      have h_s1_to_s8 : Steps is s1 s8 := Steps.append h_s1_to_s7 hs7_to_s8
+      have h_s1_to_s9 : Steps is s1 s9 := Steps.trans h_s1_to_s8 hstep_pop1
+      have h_s1_to_s10 : Steps is s1 s10 := Steps.trans h_s1_to_s9 hstep_pop2
+      have h_s1_to_s11 : Steps is s1 s11 := Steps.trans h_s1_to_s10 hstep_jmpabs_ret
+      exact Steps.append hs1 h_s1_to_s11
+    · refine ⟨?_, ?_, ?_, ?_⟩
+      · -- ! Final pc = pc + compile_len (.call f' e_arg) = pc + L + 6.
+        show s11.pc = pc + compile_len (.call f' e_arg)
+        show (s1.pc + 1) + 5 = pc + compile_len (.call f' e_arg)
+        rw [hpc1]
+        simp [compile_len]; omega
+      · -- ! Stack restored.
+        show s11.stack = stk ++ k
+        rfl
+      · -- ! rax holds the function result, representing v_val.
+        show Represents v_val s11.regs.rax s11.heap
+        have hrax_s11 : s11.regs.rax = s8.regs.rax := by
+          show s10.regs.rax = s8.regs.rax
+          show (Reg.write .r9 retaddr s9.regs).rax = s8.regs.rax
+          show s9.regs.rax = s8.regs.rax
+          show (Reg.write .r9 s1.regs.rax s8.regs).rax = s8.regs.rax
+          simp [Reg.write]
+        have hheap_s11 : s11.heap = s8.heap := rfl
+        rw [hrax_s11, hheap_s11]
+        exact hrepr8
+      · -- ! Heap extension chain: hext1 (from IH1) ∘ hext8 (from IH2 with shifted base).
+        show HeapExtends h s11.heap
+        have hheap_s11_s8 : s11.heap = s8.heap := rfl
+        rw [hheap_s11_s8]
+        -- hext8 : HeapExtends s7.heap s8.heap. s7.heap = s1.heap.
+        have hext_s1_s8 : HeapExtends s1.heap s8.heap := by
+          have : HeapExtends s7.heap s8.heap := hext8
+          rw [hheap_s7] at this; exact this
+        exact HeapExtends.trans hext1 hext_s1_s8
+    · -- ! FreshFrom carries from IH2 (rbx and heap untouched by the return trio).
+      have hrbx_s11 : s11.regs.rbx = s8.regs.rbx := by
+        show s10.regs.rbx = s8.regs.rbx
+        show (Reg.write .r9 retaddr s9.regs).rbx = s8.regs.rbx
+        show s9.regs.rbx = s8.regs.rbx
+        show (Reg.write .r9 s1.regs.rax s8.regs).rbx = s8.regs.rbx
+        simp [Reg.write]
+      have hheap_s11_s8 : s11.heap = s8.heap := rfl
+      rw [hheap_s11_s8, hrbx_s11]
+      exact hfresh8
 
   | pairr _ _ ih1 ih2 =>
     -- ! `pair e1 e2` compiles to:
@@ -2708,11 +3093,12 @@ theorem compiler_correct_general
       rw [hheap_s5, hrbx_s5, hrax_s5]
     have hheap_s8 : s8.heap = s6.heap := by rfl
     -- ! HeapExtends chain s3 → s4 → s6.
+    -- yunze: FreshFrom is now a structure; use `.lookup` to apply.
     have hfresh3_at_1 : Heap.lookup s3.heap (s3.regs.rbx + 1) = none := by
-      have h := hfresh3 1
+      have h := hfresh3.lookup 1
       simpa using h
     have hfresh3_at_0 : Heap.lookup s3.heap (s3.regs.rbx + 0) = none := by
-      have h := hfresh3 0
+      have h := hfresh3.lookup 0
       simpa using h
     have hext_s3_s4 : HeapExtends s3.heap s4.heap := by
       rw [hheap_s4]
@@ -2746,9 +3132,10 @@ theorem compiler_correct_general
       rw [ext_lookup_of_ne hne10]
       simp [Heap.lookup, Heap.ext]
     -- ! Build Represents.pair at the pair address `s3.regs.rbx`.
+    -- yunze: supply the new `s3.regs.rbx ≥ 1` premise from `hfresh3.pos`.
     have hpair_at_addr : Represents (.pair v1_val v2_val) s3.regs.rbx s8.heap :=
       Represents.pair (i1 := s1.regs.rax) (i2 := s3.regs.rax)
-        hrepr1_s8 hrepr2_s8 hlook0 hlook1
+        hrepr1_s8 hrepr2_s8 hlook0 hlook1 hfresh3.pos
     -- ! s8.regs.rax = s3.regs.rbx (movr rax rbx, addi rbx unchanged for rax).
     have hrax_s8 : s8.regs.rax = s3.regs.rbx := by
       show (Reg.write .rbx (Reg.read .rbx s7.regs + 2) s7.regs).rax = s3.regs.rbx
@@ -2825,7 +3212,7 @@ theorem compiler_correct_general
     rcases ih hcode_e hrel hfresh with
       ⟨s1, hs1, ⟨hpc1, hstack1, hrepr1, hext1⟩, hfresh1⟩
     -- ? Crack open the `Represents (.pair v1 v2)` to get the heap layout.
-    rcases Represents.pair_inv hrepr1 with ⟨i1, i2, hrep1, _hrep2, hlook1, _hlook2⟩
+    rcases Represents.pair_inv hrepr1 with ⟨i1, i2, hrep1, _hrep2, hlook1, _hlook2, _hpos⟩
     let s2 : State :=
       { s1 with
         pc := s1.pc + 1
@@ -2878,7 +3265,7 @@ theorem compiler_correct_general
       exact code_at_head hmid
     rcases ih hcode_e hrel hfresh with
       ⟨s1, hs1, ⟨hpc1, hstack1, hrepr1, hext1⟩, hfresh1⟩
-    rcases Represents.pair_inv hrepr1 with ⟨i1, i2, _hrep1, hrep2, _hlook1, hlook2⟩
+    rcases Represents.pair_inv hrepr1 with ⟨i1, i2, _hrep1, hrep2, _hlook1, hlook2, _hpos⟩
     let s2 : State :=
       { s1 with
         pc := s1.pc + 1
@@ -3108,11 +3495,12 @@ theorem compiler_correct_general
            Heap.ext s4.heap (s3.regs.rbx + 0) s1.regs.rax
       rw [hheap_s5, hrbx_s5, hrax_s5]
     have hheap_s8 : s8.heap = s6.heap := by rfl
+    -- yunze: FreshFrom is now a structure; use `.lookup` to apply.
     have hfresh3_at_1 : Heap.lookup s3.heap (s3.regs.rbx + 1) = none := by
-      have h := hfresh3 1
+      have h := hfresh3.lookup 1
       simpa using h
     have hfresh3_at_0 : Heap.lookup s3.heap (s3.regs.rbx + 0) = none := by
-      have h := hfresh3 0
+      have h := hfresh3.lookup 0
       simpa using h
     have hext_s3_s4 : HeapExtends s3.heap s4.heap := by
       rw [hheap_s4]
@@ -3142,9 +3530,10 @@ theorem compiler_correct_general
       have hne10 : (s3.regs.rbx + 1 : Int) ≠ s3.regs.rbx + 0 := by omega
       rw [ext_lookup_of_ne hne10]
       simp [Heap.lookup, Heap.ext]
+    -- yunze: supply the new `s3.regs.rbx ≥ 1` premise from `hfresh3.pos`.
     have hpair_at_addr : Represents (.pair v1_val v2_val) s3.regs.rbx s8.heap :=
       Represents.pair (i1 := s1.regs.rax) (i2 := s3.regs.rax)
-        hrepr1_s8 hrepr2_s8 hlook0 hlook1
+        hrepr1_s8 hrepr2_s8 hlook0 hlook1 hfresh3.pos
     have hrax_s8 : s8.regs.rax = s3.regs.rbx := by
       show (Reg.write .rbx (Reg.read .rbx s7.regs + 2) s7.regs).rax = s3.regs.rbx
       show s7.regs.rax = s3.regs.rbx
@@ -3191,15 +3580,329 @@ theorem compiler_correct_general
       exact FreshFrom.step hfresh3
 
   | isnilt _ ih =>
-    -- ! ⚠️ Blocked by codegen: `compile (.is_nil e)` currently always writes 0
-    -- ! to rax (line 466–468) regardless of the `cmp` result, so this case
-    -- ! cannot be proven as written. Fix the compiler first (need a conditional
-    -- ! move based on `zf`, or rewrite using `bnz` + two `movi`s).
-    sorry
+    -- ! yunze: with the corrected codegen
+    -- !     [movi r9 0, cmp rax r9, movi rax 0, bnz 2, movi rax 1]
+    -- ! the `isnilt` case (input is `.nil`, output is `.bool true`) goes:
+    -- !   IH gives rax = 0 (Represents.nil_inv).
+    -- !   movi r9 0 → r9 = 0.
+    -- !   cmp        → zf = (0 == 0) = true.
+    -- !   movi rax 0 → rax = 0.
+    -- !   bnz 2 with zf = true → bnzf falls through (pc + 1).
+    -- !   movi rax 1 → rax = 1 = encoding of `.bool true`. ✓
+    rename_i r' e_sub _hev
+    -- ! 1) Locate the 5 trailing instructions inside `is`.
+    have hcode_e_sub : code_at is pc (compile ds c e_sub) :=
+      code_at_compile_left
+        (tail := [.movi .r9 0, .cmp .rax .r9, .movi .rax 0, .bnz 2, .movi .rax 1])
+        (by simpa [compile, List.append_assoc] using hcode)
+    have htail_at :
+        code_at is (pc + compile_len e_sub)
+          [.movi .r9 0, .cmp .rax .r9, .movi .rax 0, .bnz 2, .movi .rax 1] := by
+      simpa using
+        (code_at_after_compile_prefix
+          (pfx := [])
+          (mid := [.movi .r9 0, .cmp .rax .r9, .movi .rax 0, .bnz 2, .movi .rax 1])
+          (sfx := [])
+          (by simpa [compile, List.append_assoc] using hcode))
+    have hmovi_r9_at_abs : instr_at is (pc + compile_len e_sub) (.movi .r9 0) :=
+      code_at_head htail_at
+    have hcmp_at_abs : instr_at is (pc + compile_len e_sub + 1) (.cmp .rax .r9) :=
+      code_at_head (code_at_tail htail_at)
+    have hmovi_0_at_abs : instr_at is (pc + compile_len e_sub + 2) (.movi .rax 0) :=
+      code_at_head (code_at_tail (code_at_tail htail_at))
+    have hbnz_at_abs : instr_at is (pc + compile_len e_sub + 3) (.bnz 2) :=
+      code_at_head (code_at_tail (code_at_tail (code_at_tail htail_at)))
+    have hmovi_1_at_abs : instr_at is (pc + compile_len e_sub + 4) (.movi .rax 1) :=
+      code_at_head (code_at_tail (code_at_tail (code_at_tail (code_at_tail htail_at))))
+    -- ! 2) IH on e_sub → s1, rax represents .nil so rax = 0.
+    rcases ih hcode_e_sub hrel hfresh with
+      ⟨s1, hs1, ⟨hpc1, hstack1, hrepr1, hext1⟩, hfresh1⟩
+    have hrax1 : s1.regs.rax = 0 := Represents.nil_inv hrepr1
+    -- ! 3) movi r9 0 at s1 → s2
+    let s2 : State :=
+      { s1 with
+        pc := s1.pc + 1
+        regs := Reg.write .r9 0 s1.regs }
+    have hmovi_r9' : instr_at is s1.pc (.movi .r9 0) := by
+      simpa [hpc1] using hmovi_r9_at_abs
+    have hstep_movi_r9 : Step is s1 s2 := Step.movi (s := s1) hmovi_r9'
+    -- ! 4) cmp rax r9 at s2 → s3. zf = (0 == 0) = true.
+    let s3 : State :=
+      { s2 with
+        pc := s2.pc + 1
+        zf := (Reg.read .rax s2.regs == Reg.read .r9 s2.regs) }
+    have hcmp' : instr_at is s2.pc (.cmp .rax .r9) := by
+      show instr_at is (s1.pc + 1) (.cmp .rax .r9)
+      have hh : (s1.pc + 1 : Nat) = pc + compile_len e_sub + 1 := by rw [hpc1]
+      rw [hh]; exact hcmp_at_abs
+    have hstep_cmp : Step is s2 s3 := Step.cmp (s := s2) hcmp'
+    have hzf3 : s3.zf = true := by
+      show (Reg.read .rax s2.regs == Reg.read .r9 s2.regs) = true
+      have hr9 : Reg.read .r9 s2.regs = 0 := by
+        show (Reg.write .r9 0 s1.regs).r9 = 0
+        simp [Reg.write]
+      have hax : Reg.read .rax s2.regs = 0 := by
+        show (Reg.write .r9 0 s1.regs).rax = 0
+        show s1.regs.rax = 0
+        exact hrax1
+      rw [hax, hr9]; decide
+    -- ! 5) movi rax 0 at s3 → s4. rax = 0.
+    let s4 : State :=
+      { s3 with
+        pc := s3.pc + 1
+        regs := Reg.write .rax 0 s3.regs }
+    have hmovi_0' : instr_at is s3.pc (.movi .rax 0) := by
+      show instr_at is (s2.pc + 1) (.movi .rax 0)
+      show instr_at is (s1.pc + 1 + 1) (.movi .rax 0)
+      have hh : (s1.pc + 1 + 1 : Nat) = pc + compile_len e_sub + 2 := by rw [hpc1]
+      rw [hh]; exact hmovi_0_at_abs
+    have hstep_movi_0 : Step is s3 s4 := Step.movi (s := s3) hmovi_0'
+    -- ! 6) bnz 2 at s4: zf = true, so bnzf falls through (pc + 1).
+    let s5 : State :=
+      { s4 with pc := s4.pc + 1 }
+    have hbnz' : instr_at is s4.pc (.bnz 2) := by
+      show instr_at is (s3.pc + 1) (.bnz 2)
+      show instr_at is (s2.pc + 1 + 1) (.bnz 2)
+      show instr_at is (s1.pc + 1 + 1 + 1) (.bnz 2)
+      have hh : (s1.pc + 1 + 1 + 1 : Nat) = pc + compile_len e_sub + 3 := by rw [hpc1]
+      rw [hh]; exact hbnz_at_abs
+    have hzf4 : s4.zf = true := by
+      show s3.zf = true
+      exact hzf3
+    have hstep_bnz : Step is s4 s5 := Step.bnzf (s := s4) hbnz' hzf4
+    -- ! 7) movi rax 1 at s5 → s6. rax = 1.
+    let s6 : State :=
+      { s5 with
+        pc := s5.pc + 1
+        regs := Reg.write .rax 1 s5.regs }
+    have hmovi_1' : instr_at is s5.pc (.movi .rax 1) := by
+      show instr_at is (s4.pc + 1) (.movi .rax 1)
+      show instr_at is (s3.pc + 1 + 1) (.movi .rax 1)
+      show instr_at is (s2.pc + 1 + 1 + 1) (.movi .rax 1)
+      show instr_at is (s1.pc + 1 + 1 + 1 + 1) (.movi .rax 1)
+      have hh : (s1.pc + 1 + 1 + 1 + 1 : Nat) = pc + compile_len e_sub + 4 := by rw [hpc1]
+      rw [hh]; exact hmovi_1_at_abs
+    have hstep_movi_1 : Step is s5 s6 := Step.movi (s := s5) hmovi_1'
+    -- ! 8) Package: chain s1 → s2 → s3 → s4 → s5 → s6.
+    refine ⟨s6, ?_, ?_, ?_⟩
+    · have h_s1_to_s2 : Steps is s1 s2 := Steps.trans Steps.refl hstep_movi_r9
+      have h_s1_to_s3 : Steps is s1 s3 := Steps.trans h_s1_to_s2 hstep_cmp
+      have h_s1_to_s4 : Steps is s1 s4 := Steps.trans h_s1_to_s3 hstep_movi_0
+      have h_s1_to_s5 : Steps is s1 s5 := Steps.trans h_s1_to_s4 hstep_bnz
+      have h_s1_to_s6 : Steps is s1 s6 := Steps.trans h_s1_to_s5 hstep_movi_1
+      exact Steps.append hs1 h_s1_to_s6
+    · refine ⟨?_, ?_, ?_, ?_⟩
+      · -- ! pc bookkeeping: 5 instrs past pc + compile_len e_sub.
+        show s6.pc = pc + compile_len (.is_nil e_sub)
+        show s5.pc + 1 = _
+        show s4.pc + 1 + 1 = _
+        show s3.pc + 1 + 1 + 1 = _
+        show s2.pc + 1 + 1 + 1 + 1 = _
+        show s1.pc + 1 + 1 + 1 + 1 + 1 = _
+        rw [hpc1]; simp [compile_len]; omega
+      · -- ! Stack untouched by movi/cmp/bnz/movi.
+        show s6.stack = stk ++ k
+        show s5.stack = stk ++ k
+        show s4.stack = stk ++ k
+        show s3.stack = stk ++ k
+        show s2.stack = stk ++ k
+        show s1.stack = stk ++ k
+        exact hstack1
+      · -- ! rax = 1 represents .bool true.
+        show Represents (.bool true) s6.regs.rax s6.heap
+        have hrax6 : s6.regs.rax = 1 := by
+          show (Reg.write .rax 1 s5.regs).rax = 1
+          simp [Reg.write]
+        rw [hrax6]
+        -- ! Represents.bool gives `Represents (.bool b) (if b then 1 else 0) h`.
+        exact Represents.bool (b := true)
+      · -- ! Heap unchanged across all 5 trailing instructions.
+        show HeapExtends h s6.heap
+        have hheap6 : s6.heap = s1.heap := by
+          show s5.heap = s1.heap
+          show s4.heap = s1.heap
+          show s3.heap = s1.heap
+          show s2.heap = s1.heap
+          rfl
+        rw [hheap6]
+        exact hext1
+    · -- ! FreshFrom: heap unchanged, rbx unchanged.
+      have hheap6 : s6.heap = s1.heap := by
+        show s5.heap = s1.heap
+        show s4.heap = s1.heap
+        show s3.heap = s1.heap
+        show s2.heap = s1.heap
+        rfl
+      have hrbx6 : s6.regs.rbx = s1.regs.rbx := by
+        show (Reg.write .rax 1 s5.regs).rbx = s1.regs.rbx
+        show s5.regs.rbx = s1.regs.rbx
+        show s4.regs.rbx = s1.regs.rbx
+        show (Reg.write .rax 0 s3.regs).rbx = s1.regs.rbx
+        show s3.regs.rbx = s1.regs.rbx
+        show s2.regs.rbx = s1.regs.rbx
+        show (Reg.write .r9 0 s1.regs).rbx = s1.regs.rbx
+        simp [Reg.write]
+      rw [hheap6, hrbx6]
+      exact hfresh1
 
   | isnilf _ ih =>
-    -- ! Same blocker as `isnilt`.
-    sorry
+    -- ! yunze: now unblocked by Option A (strengthened FreshFrom + `i ≥ 1` on
+    -- ! Represents.pair). Trace with the corrected codegen
+    -- !     [movi r9 0, cmp rax r9, movi rax 0, bnz 2, movi rax 1]:
+    -- !   IH gives Represents (.pair v1 v2) rax heap. By `pair_inv` we extract
+    -- !   `rax ≥ 1`, so rax ≠ 0.
+    -- !   movi r9 0 → r9 = 0.
+    -- !   cmp        → zf = (rax == 0) = false (since rax ≥ 1).
+    -- !   movi rax 0 → rax = 0.
+    -- !   bnz 2 with zf = false → bnzt jumps pc + 2 (skips movi rax 1).
+    -- !   Final: rax = 0 = encoding of `.bool false`. ✓
+    rename_i r' e_sub v1_val v2_val _hev
+    -- ! 1) Locate the 5 trailing instructions inside `is`.
+    have hcode_e_sub : code_at is pc (compile ds c e_sub) :=
+      code_at_compile_left
+        (tail := [.movi .r9 0, .cmp .rax .r9, .movi .rax 0, .bnz 2, .movi .rax 1])
+        (by simpa [compile, List.append_assoc] using hcode)
+    have htail_at :
+        code_at is (pc + compile_len e_sub)
+          [.movi .r9 0, .cmp .rax .r9, .movi .rax 0, .bnz 2, .movi .rax 1] := by
+      simpa using
+        (code_at_after_compile_prefix
+          (pfx := [])
+          (mid := [.movi .r9 0, .cmp .rax .r9, .movi .rax 0, .bnz 2, .movi .rax 1])
+          (sfx := [])
+          (by simpa [compile, List.append_assoc] using hcode))
+    have hmovi_r9_at_abs : instr_at is (pc + compile_len e_sub) (.movi .r9 0) :=
+      code_at_head htail_at
+    have hcmp_at_abs : instr_at is (pc + compile_len e_sub + 1) (.cmp .rax .r9) :=
+      code_at_head (code_at_tail htail_at)
+    have hmovi_0_at_abs : instr_at is (pc + compile_len e_sub + 2) (.movi .rax 0) :=
+      code_at_head (code_at_tail (code_at_tail htail_at))
+    have hbnz_at_abs : instr_at is (pc + compile_len e_sub + 3) (.bnz 2) :=
+      code_at_head (code_at_tail (code_at_tail (code_at_tail htail_at)))
+    -- ! 2) IH on e_sub. `pair_inv` exposes `rax ≥ 1`.
+    rcases ih hcode_e_sub hrel hfresh with
+      ⟨s1, hs1, ⟨hpc1, hstack1, hrepr1, hext1⟩, hfresh1⟩
+    rcases Represents.pair_inv hrepr1 with ⟨_, _, _, _, _, _, hpos1⟩
+    -- ! 3) movi r9 0 at s1 → s2.
+    let s2 : State :=
+      { s1 with
+        pc := s1.pc + 1
+        regs := Reg.write .r9 0 s1.regs }
+    have hmovi_r9' : instr_at is s1.pc (.movi .r9 0) := by
+      simpa [hpc1] using hmovi_r9_at_abs
+    have hstep_movi_r9 : Step is s1 s2 := Step.movi (s := s1) hmovi_r9'
+    -- ! 4) cmp rax r9 at s2 → s3. rax = s1.regs.rax ≥ 1, r9 = 0, so zf = false.
+    let s3 : State :=
+      { s2 with
+        pc := s2.pc + 1
+        zf := (Reg.read .rax s2.regs == Reg.read .r9 s2.regs) }
+    have hcmp' : instr_at is s2.pc (.cmp .rax .r9) := by
+      show instr_at is (s1.pc + 1) (.cmp .rax .r9)
+      have hh : (s1.pc + 1 : Nat) = pc + compile_len e_sub + 1 := by rw [hpc1]
+      rw [hh]; exact hcmp_at_abs
+    have hstep_cmp : Step is s2 s3 := Step.cmp (s := s2) hcmp'
+    have hzf3 : s3.zf = false := by
+      show (Reg.read .rax s2.regs == Reg.read .r9 s2.regs) = false
+      have hr9 : Reg.read .r9 s2.regs = 0 := by
+        show (Reg.write .r9 0 s1.regs).r9 = 0
+        simp [Reg.write]
+      have hax : Reg.read .rax s2.regs = s1.regs.rax := by
+        show (Reg.write .r9 0 s1.regs).rax = s1.regs.rax
+        simp [Reg.write]
+      rw [hax, hr9]
+      -- ! rax ≥ 1, so rax ≠ 0, hence (rax == 0) = false.
+      have hne : s1.regs.rax ≠ 0 := by
+        intro h; rw [h] at hpos1; exact absurd hpos1 (by decide)
+      rw [Bool.eq_false_iff]
+      intro hbeq
+      exact hne (by simpa using hbeq)
+    -- ! 5) movi rax 0 at s3 → s4. rax becomes 0.
+    let s4 : State :=
+      { s3 with
+        pc := s3.pc + 1
+        regs := Reg.write .rax 0 s3.regs }
+    have hmovi_0' : instr_at is s3.pc (.movi .rax 0) := by
+      show instr_at is (s2.pc + 1) (.movi .rax 0)
+      show instr_at is (s1.pc + 1 + 1) (.movi .rax 0)
+      have hh : (s1.pc + 1 + 1 : Nat) = pc + compile_len e_sub + 2 := by rw [hpc1]
+      rw [hh]; exact hmovi_0_at_abs
+    have hstep_movi_0 : Step is s3 s4 := Step.movi (s := s3) hmovi_0'
+    -- ! 6) bnz 2 at s4: zf = false → bnzt → pc += 2 (skips movi rax 1).
+    let s5 : State :=
+      { s4 with pc := (Int.ofNat s4.pc + 2).toNat }
+    have hbnz' : instr_at is s4.pc (.bnz 2) := by
+      show instr_at is (s3.pc + 1) (.bnz 2)
+      show instr_at is (s2.pc + 1 + 1) (.bnz 2)
+      show instr_at is (s1.pc + 1 + 1 + 1) (.bnz 2)
+      have hh : (s1.pc + 1 + 1 + 1 : Nat) = pc + compile_len e_sub + 3 := by rw [hpc1]
+      rw [hh]; exact hbnz_at_abs
+    have hzf4 : s4.zf = false := by
+      show s3.zf = false
+      exact hzf3
+    have hstep_bnz : Step is s4 s5 := Step.bnzt (s := s4) hbnz' hzf4
+    -- ! 7) Package: chain s1 → s2 → s3 → s4 → s5.
+    refine ⟨s5, ?_, ?_, ?_⟩
+    · have h_s1_to_s2 : Steps is s1 s2 := Steps.trans Steps.refl hstep_movi_r9
+      have h_s1_to_s3 : Steps is s1 s3 := Steps.trans h_s1_to_s2 hstep_cmp
+      have h_s1_to_s4 : Steps is s1 s4 := Steps.trans h_s1_to_s3 hstep_movi_0
+      have h_s1_to_s5 : Steps is s1 s5 := Steps.trans h_s1_to_s4 hstep_bnz
+      exact Steps.append hs1 h_s1_to_s5
+    · refine ⟨?_, ?_, ?_, ?_⟩
+      · -- ! pc bookkeeping: s5.pc = s4.pc + 2 = pc + compile_len e_sub + 5.
+        -- ! (s4 is reached after 3 instructions past s1: movi/cmp/movi.)
+        show s5.pc = pc + compile_len (.is_nil e_sub)
+        show (Int.ofNat s4.pc + 2).toNat = pc + compile_len (.is_nil e_sub)
+        have hs4pc : s4.pc = pc + compile_len e_sub + 3 := by
+          show s3.pc + 1 = _
+          show s2.pc + 1 + 1 = _
+          show s1.pc + 1 + 1 + 1 = _
+          rw [hpc1]
+        rw [hs4pc]
+        -- ! (Int.ofNat (pc + L + 3) + (2 : Int)).toNat reduces by defeq to
+        -- ! `pc + compile_len e_sub + 3 + 2`.
+        show pc + compile_len e_sub + 3 + 2 = pc + compile_len (.is_nil e_sub)
+        simp [compile_len]; omega
+      · -- ! Stack untouched by movi/cmp/movi/bnz.
+        show s5.stack = stk ++ k
+        show s4.stack = stk ++ k
+        show s3.stack = stk ++ k
+        show s2.stack = stk ++ k
+        show s1.stack = stk ++ k
+        exact hstack1
+      · -- ! rax = 0 represents .bool false.
+        show Represents (.bool false) s5.regs.rax s5.heap
+        have hrax5 : s5.regs.rax = 0 := by
+          show s4.regs.rax = 0
+          show (Reg.write .rax 0 s3.regs).rax = 0
+          simp [Reg.write]
+        rw [hrax5]
+        -- ! `Represents.bool` gives `Represents (.bool b) (if b then 1 else 0) h`.
+        have h := Represents.bool (b := false) (h := s5.heap)
+        simpa using h
+      · -- ! Heap unchanged across all 4 trailing instructions.
+        show HeapExtends h s5.heap
+        have hheap5 : s5.heap = s1.heap := by
+          show s4.heap = s1.heap
+          show s3.heap = s1.heap
+          show s2.heap = s1.heap
+          rfl
+        rw [hheap5]
+        exact hext1
+    · -- ! FreshFrom: heap unchanged, rbx unchanged.
+      have hheap5 : s5.heap = s1.heap := by
+        show s4.heap = s1.heap
+        show s3.heap = s1.heap
+        show s2.heap = s1.heap
+        rfl
+      have hrbx5 : s5.regs.rbx = s1.regs.rbx := by
+        show s4.regs.rbx = s1.regs.rbx
+        show (Reg.write .rax 0 s3.regs).rbx = s1.regs.rbx
+        show s3.regs.rbx = s1.regs.rbx
+        show s2.regs.rbx = s1.regs.rbx
+        show (Reg.write .r9 0 s1.regs).rbx = s1.regs.rbx
+        simp [Reg.write]
+      rw [hheap5, hrbx5]
+      exact hfresh1
 
 
 
@@ -3217,11 +3920,14 @@ def FinalState (ds : Defns) (e : Expr) (v : Val) (s : State) : Prop :=
   s.stack = [] ∧
   Represents v s.regs.rax s.heap
 
+-- yunze: initial rbx changed from 0 to 1. The new FreshFrom invariant
+-- requires `rbx ≥ 1` at all times, and we establish it at the program
+-- entry. This is a visible change to the theorem's public statement.
 theorem compile_prog_correct {ds e v}
     (heval : Eval ds [] e v) :
     ∃ s',
       Steps (compile_prog ds e)
-        { pc := 0, regs := Reg.write .rbx 0 regs0, stack := [], zf := false, heap := [] } s' ∧
+        { pc := 0, regs := Reg.write .rbx 1 regs0, stack := [], zf := false, heap := [] } s' ∧
       FinalState ds e v s' := by
   -- ! The compiled whole program is laid out as:
   -- !   [ .jmp (compile_defns_len ds + 1) ]   -- pc 0, the leading jump
@@ -3248,7 +3954,7 @@ theorem compile_prog_correct {ds e v}
 
   let s0 : State :=
     { pc := 0
-      regs := Reg.write .rbx 0 regs0
+      regs := Reg.write .rbx 1 regs0
       stack := []
       zf := false
       heap := [] }
@@ -3268,9 +3974,16 @@ theorem compile_prog_correct {ds e v}
   have hrel : Related ([] : Stack) ([] : CEnv) ([] : Env) s1.heap :=
     Related.mt
   have hfresh : FreshFrom s1.heap s1.regs.rbx := by
-    -- s1.heap is still []; `Heap.lookup []` is `none` for every address.
-    intro k
-    rfl
+    -- yunze: now need to provide both fields. `pos`: rbx was initialized to 1
+    -- and never written before s1. `lookup`: heap is still []; `Heap.lookup []`
+    -- is `none` for every address.
+    refine ⟨?_, ?_⟩
+    · -- pos: s1.regs.rbx = (Reg.write .rbx 1 regs0).rbx = 1 ≥ 1
+      show s1.regs.rbx ≥ 1
+      show (Reg.write .rbx 1 regs0).rbx ≥ 1
+      simp [Reg.write]
+    · intro k
+      rfl
 
   -- (3) Run the simulation. We have to pin down every implicit input
   --     (especially `zf`) so that the resulting `Steps` starts at *exactly*
