@@ -514,9 +514,6 @@ def compile (ds : Defns) (c : CEnv) (e : Expr) : List Instr :=
      .store .rbx .rax 0,
      .movr .rax .rbx,
      .addi .rbx 2]
-  -- | .is_nil e =>
-  --   compile ds c e ++
-  --   [.movi .r9 0, .cmp .rax .r9, .movi .rax 0]
   | .is_nil e =>
     compile ds c e ++
     [ .movi .r9 0,
@@ -794,7 +791,7 @@ theorem Represents.mono {v i h h'} :
   | bool =>
     exact .bool
   | nil =>
-    exact .nil -- added this line to handle nil
+    exact .nil
   | pair h1 h2 hlook1 hlook2 ih1 ih2 =>
     exact .pair (ih1 hext) (ih2 hext) (hext _ _ hlook1) (hext _ _ hlook2)
 
@@ -805,6 +802,15 @@ theorem Represents.bool_inv {b i h} :
   cases hrep with
   | bool =>
       rfl
+
+-- Helper for checking that after is_nil compiles and puts 1 or 0 in rax
+-- theorem proves that ints correctly represent .bool true or .bool false
+theorem Represents.bool_of_int {i : Int} :
+  (i = 1 ∨ i = 0) -> Represents (.bool (i = 1)) i h := by
+  intro h
+  rcases h with rfl | rfl
+  · simp; exact .bool
+  · simp; exact .bool
 
 -- ? Yunze: I added a few more helper functions here
 -- ! Inversion helper for `int`: lets us read off `s.regs.rax = i` from
@@ -838,51 +844,9 @@ theorem Represents.nil_inv {i h} :
   Represents .nil i h -> i = 0 := by
   intro h; cases h; rfl
 
-theorem Related.mono {s c r h h'} :
-  Related s c r h ->
-  HeapExtends h h' ->
-  Related s c r h' := by
-  intro hrel hext
-  induction hrel with
-  | mt =>
-    exact .mt
-  | push hrel ih =>
-    exact .push (ih hext)
-  | bind hrel hrep ih =>
-    exact .bind (ih hext) (Represents.mono hrep hext)
-
-theorem Related.push_mono {s c r h h' i} :
-  Related s c r h ->
-  HeapExtends h h' ->
-  Related (i :: s) (none :: c) r h' := by
-  intro hrel hext
-  exact Related.push (i := i) (Related.mono hrel hext)
-
-theorem ext_lookup_of_ne {h : Heap} {a b i : Int} (hba : b ≠ a) :
-  Heap.lookup (Heap.ext h a i) b = Heap.lookup h b := by
-  simp [Heap.lookup, Heap.ext, hba]
-
--- ! If `a` was fresh before, then after writing at `a` and `a+1`,
--- ! everything from `a+2` onward is still fresh.
-theorem FreshFrom.step {h : Heap} {a i1 i2 : Int} :
-  FreshFrom h a ->
-  FreshFrom ((h.ext (a + 1) i2).ext a i1) (a + 2) := by
-  intro hfresh
-  intro k
-  -- ? Expand the two heap writes and check the queried address is not `a`.
-  have hne1 : a + 2 + k ≠ a := by
-    omega
-  -- ? Check it is also not `a + 1`.
-  have hne2 : a + 2 + k ≠ a + 1 := by
-    omega
-  rw [ext_lookup_of_ne hne1, ext_lookup_of_ne hne2]
-  -- ? Now we can use the original freshness from `a`.
-  have := hfresh (k + 2)
-  simpa [Int.add_assoc, Int.add_left_comm, Int.add_comm] using this
-
 -- Lemma verifies that if we store two values at b and b+1
 -- Represent a pair/cons at address b
-theorem represents_cons_layout {h : Heap} {v1 v2 : Val} {i1 i2 b : Int}
+theorem Represents.cons {h : Heap} {v1 v2 : Val} {i1 i2 b : Int}
   (h_fresh : FreshFrom h b)
   (h1 : Represents v1 i1 h)
   (h2 : Represents v2 i2 h) :
@@ -915,6 +879,65 @@ theorem represents_cons_layout {h : Heap} {v1 v2 : Val} {i1 i2 b : Int}
   · simp [Heap.lookup, Heap.ext]
   · have h_ne : b + 1 ≠ b := by omega
     simp [Heap.lookup, Heap.ext, h_ne]
+
+theorem Related.mono {s c r h h'} :
+  Related s c r h ->
+  HeapExtends h h' ->
+  Related s c r h' := by
+  intro hrel hext
+  induction hrel with
+  | mt =>
+    exact .mt
+  | push hrel ih =>
+    exact .push (ih hext)
+  | bind hrel hrep ih =>
+    exact .bind (ih hext) (Represents.mono hrep hext)
+
+theorem Related.push_mono {s c r h h' i} :
+  Related s c r h ->
+  HeapExtends h h' ->
+  Related (i :: s) (none :: c) r h' := by
+  intro hrel hext
+  exact Related.push (i := i) (Related.mono hrel hext)
+
+theorem Related.pop {s c r h i} :
+  Related (i :: s) (none :: c) r h ->
+  Related s c r h := by
+  intro hrel
+  cases hrel with
+  | push h => exact h
+
+theorem Related.bind_mono {s c r x v h h' i} :
+  Related s c r h ->
+  Represents v i h ->
+  HeapExtends h h' ->
+  Related (i :: s) (some x :: c) ((x, v) :: r) h' := by
+  intro hrel hrep hext
+  apply Related.bind
+  · exact Related.mono hrel hext
+  · exact Represents.mono hrep hext
+
+theorem ext_lookup_of_ne {h : Heap} {a b i : Int} (hba : b ≠ a) :
+  Heap.lookup (Heap.ext h a i) b = Heap.lookup h b := by
+  simp [Heap.lookup, Heap.ext, hba]
+
+-- ! If `a` was fresh before, then after writing at `a` and `a+1`,
+-- ! everything from `a+2` onward is still fresh.
+theorem FreshFrom.step {h : Heap} {a i1 i2 : Int} :
+  FreshFrom h a ->
+  FreshFrom ((h.ext (a + 1) i2).ext a i1) (a + 2) := by
+  intro hfresh
+  intro k
+  -- ? Expand the two heap writes and check the queried address is not `a`.
+  have hne1 : a + 2 + k ≠ a := by
+    omega
+  -- ? Check it is also not `a + 1`.
+  have hne2 : a + 2 + k ≠ a + 1 := by
+    omega
+  rw [ext_lookup_of_ne hne1, ext_lookup_of_ne hne2]
+  -- ? Now we can use the original freshness from `a`.
+  have := hfresh (k + 2)
+  simpa [Int.add_assoc, Int.add_left_comm, Int.add_comm] using this
 
 -- ! The compiler always produces exactly `compile_len e` instructions.
 theorem compile_length (ds : Defns) (c : CEnv) (e : Expr) :
@@ -1277,25 +1300,6 @@ theorem compiler_expr_correct_pred
         ·
           simpa [s2, hrepr_int, Reg.read, Reg.write] using (Represents.int (i := i - 1) (h := s1.heap))
         · exact hext1
-
--- ! This is the main simulation theorem:
--- ! if the source expression evaluates to `v`, then the compiled code
--- ! takes a related machine state to a state representing `v`.
--- theorem compiler_correct_general
---     {ds c r e v is pc stk k rs zf h}
---     (hdefs : defns_in_place is ds)
---     (hcode : code_at is pc (compile ds c e))
---     (hrel : Related stk c r h)
---     (heval : Eval ds r e v)
---     (hfresh : FreshFrom h rs.rbx) :
---     ∃ s',
---       Steps is { pc := pc, regs := rs, stack := stk ++ k, zf := zf, heap := h } s' ∧
---       ExprPost e pc stk k h v s' ∧
---       FreshFrom s'.heap s'.regs.rbx := by
---   sorry
-
-
-
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- SECTION 8 — Main simulation theorem
