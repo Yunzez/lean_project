@@ -367,6 +367,42 @@ inductive Eval : Defns -> Env -> Expr -> Val -> Prop where
     Eval ds r e (.pair v1 v2) ->
     Eval ds r (.is_nil e) (.bool false)
 
+-- ───────────────────────────────────────────────────────────────────────────
+-- Sanity-check examples for the list extension (yunze).
+-- These are small `example`s that exercise the new `Eval` rules
+-- `nilr`, `consr`, `isnilt`, `isnilf` end-to-end at the source level.
+-- They do not affect any proofs; they just confirm the rules compose.
+-- ───────────────────────────────────────────────────────────────────────────
+
+-- `nil` evaluates to `Val.nil` under any defns / env.
+example : Eval [] [] .nil .nil :=
+  Eval.nilr
+
+-- `cons 1 nil` evaluates to the pair-encoded list `pair (int 1) nil`.
+example : Eval [] [] (.cons (.int 1) .nil) (.pair (.int 1) .nil) :=
+  Eval.consr (Eval.intr 1) Eval.nilr
+
+-- `is_nil nil` evaluates to `true`.
+example : Eval [] [] (.is_nil .nil) (.bool true) :=
+  Eval.isnilt Eval.nilr
+
+-- `is_nil (cons 1 nil)` evaluates to `false` (the argument is a non-nil pair).
+example : Eval [] [] (.is_nil (.cons (.int 1) .nil)) (.bool false) :=
+  Eval.isnilf (Eval.consr (Eval.intr 1) Eval.nilr)
+
+-- A two-element list `cons 1 (cons 2 nil)` evaluates to nested pairs,
+-- confirming the right-associative pair encoding works through `consr`.
+example :
+    Eval [] [] (.cons (.int 1) (.cons (.int 2) .nil))
+               (.pair (.int 1) (.pair (.int 2) .nil)) :=
+  Eval.consr (Eval.intr 1) (Eval.consr (Eval.intr 2) Eval.nilr)
+
+-- `is_nil` on a two-element list is still `false` — only the *outermost*
+-- shape matters.
+example :
+    Eval [] [] (.is_nil (.cons (.int 1) (.cons (.int 2) .nil))) (.bool false) :=
+  Eval.isnilf (Eval.consr (Eval.intr 1) (Eval.consr (Eval.intr 2) Eval.nilr))
+
 -- ═══════════════════════════════════════════════════════════════════════════
 -- SECTION 3 — Compiler
 -- ═══════════════════════════════════════════════════════════════════════════

@@ -46,7 +46,7 @@ Use this as a lightweight team tracker.
 - [x] Added `Expr.nil`, `Expr.cons`, `Expr.is_nil`.
 - [x] Added `Val.nil`.
 - [x] Added `Eval` rules: `nilr`, `consr`, `isnilt`, `isnilf`.
-- [ ] Add small examples / sanity checks (none in the file yet).
+- [x] Add small examples / sanity checks (yunze): six `example` declarations right after the `Eval` definition exercise `nilr`, `consr`, `isnilt`, `isnilf` end-to-end at the source level — `nil ⇒ .nil`, `cons 1 nil ⇒ pair (int 1) nil`, `is_nil nil ⇒ true`, `is_nil (cons 1 nil) ⇒ false`, plus a nested two-element list and `is_nil` on it. Each is a one-liner using the constructors directly; they confirm the new rules compose without affecting any proofs.
 
 ### Part 4: Compiler Extension
 
