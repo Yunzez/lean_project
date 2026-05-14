@@ -30,9 +30,7 @@ Use this as a lightweight team tracker.
 - [x] `compiler_expr_correct_succ` is proved.
 - [x] `compiler_expr_correct_pred` is proved.
 - [x] `compiler_correct_general` — scaffolded with `induction heval`. **All 22 / 22 cases proven**: `intr`, `nilr`, `boolr`, `varr`, `succr`, `predr`, `negtr`, `negfr`, `plusr`, `timesr`, `fstr`, `sndr`, `bindr`, `pairr`, `iftr`, `iffr`, `consr`, `isnilt`, `isnilf`, `callr`. No `sorry`s remain. Added helpers: `Represents.int_inv`, `Represents.pair_inv`, `Represents.nil_inv`.
-- ✅ `callr` unblocked (yunze): ~250-line proof chains 11 explicit states. (1) `compile_defns_split hlook` extracts `entry_nat := pre_defs.length + 1` with `Defns.entry ds f' = some entry_nat`. (2) `defns_in_place` + `code_at_*` lemmas locate the body code and the trailing `[pop r9, pop r9, jmpabs r9]` at `entry_nat + compile_len e_body`. (3) The match inside `compile (.call ...)` is concretized by rewriting with `hentry_eq`. (4) IH1 → s1 (arg evaluated, rax = i1). (5) movpc → s2 (r9 := s1.pc + 1). (6) addi 5 → s3 (r9 := retaddr). (7) push r9 → s4. (8) push rax → s5 (uses `hrax_s4` chain through writes). (9) movi → s6. (10) jmpabs → s7 (pc := entry_nat; needs `(Int.ofNat n).toNat = n` via `rfl`). (11) `hstart_eq` bridges into ih2 by `rfl`, giving s8. (12) pop r9 → s9 (discard arg). (13) pop r9 → s10 (r9 := retaddr). (14) jmpabs → s11 (pc := s1.pc + 6 = pc + compile_len e_arg + 6 = pc + compile_len (.call f e_arg)). Heap untouched after IH2, so `hext1 ∘ hext8` and `hfresh8` carry through.
 - ✅ `isnilf`(yunze): strengthened `FreshFrom` to a structure carrying both `a ≥ 1` (`pos`) and the original lookup-none property (`lookup`), and added an `i ≥ 1` premise to the `Represents.pair` constructor. The invariant rides on `FreshFrom` through `compiler_correct_general` and is established in `compile_prog_correct` by initializing `rbx := 1` (was `0`). `pair_inv` now also exposes `i ≥ 1` as a final conjunct so `isnilf` can read off `rax ≥ 1` and conclude `(rax == 0) = false`.
-- ⚠️ `is_nil` codegen was buggy and is now patched (yunze): old version (`.bnz 1` with both `movi`s) was a no-op + had the bool answers swapped. Now `[movi r9 0, cmp rax r9, movi rax 0, bnz 2, movi rax 1]` — bnz skips the trailing `movi rax 1` when rax was non-zero (pair), otherwise falls through to set rax = 1 (nil case).
 - [x] `compile_prog_correct` — proved as a corollary of `compiler_correct_general` (uses the leading `.jmp`, then chains via `Steps.append`).
 
 ### Part 2: List Feature Design
@@ -46,12 +44,14 @@ Use this as a lightweight team tracker.
 - [x] Added `Expr.nil`, `Expr.cons`, `Expr.is_nil`.
 - [x] Added `Val.nil`.
 - [x] Added `Eval` rules: `nilr`, `consr`, `isnilt`, `isnilf`.
+- [x] Added `Expr.head`, `Expr.tail` with `Eval.headr` / `Eval.tailr` (Rachel). Both rules pattern-match on `.pair v1 v2`, so `head .nil` / `tail .nil` have no derivation (partial by design — matches typical strict-list semantics).
 - [x] Add small examples / sanity checks (yunze): six `example` declarations right after the `Eval` definition exercise `nilr`, `consr`, `isnilt`, `isnilf` end-to-end at the source level — `nil ⇒ .nil`, `cons 1 nil ⇒ pair (int 1) nil`, `is_nil nil ⇒ true`, `is_nil (cons 1 nil) ⇒ false`, plus a nested two-element list and `is_nil` on it. Each is a one-liner using the constructors directly; they confirm the new rules compose without affecting any proofs.
 
 ### Part 4: Compiler Extension
 
 - [x] Extended `compile_len` for `nil`, `cons`, `is_nil`.
 - [x] Extended `compile` for `nil`, `cons`, `is_nil`.
+- [x] Extended `compile_len` and `compile` for `head`, `tail` (Rachel). Both are one instruction past the subexpression — load `rax` from the heap cell pointed to by the pair address.
 - [x] ✅ `is_nil` codegen patched (yunze): now `[movi r9 0, cmp rax r9, movi rax 0, bnz 2, movi rax 1]`. Both `isnilt` and `isnilf` proven against it.
 - [x] `compile_length` covers the new cases (one `simp` line per constructor in `compile_length`).
 
@@ -60,13 +60,22 @@ Use this as a lightweight team tracker.
 - [x] Extended `Represents` with the `nil` case (`Represents .nil 0 h`).
 - [x] Add / re-use heap lemmas for the cons layout (currently piggybacks on pair, not yet verified through a proof).
 - [x] Update / extend freshness lemmas if needed for cons allocation.
-- [ ] Update `Related`-style invariants if needed.
+- [x] Update `Related`-style invariants if needed — **not needed**. `Related` is structural over `Stack`/`CEnv`/`Env` and delegates value-shape constraints to `Represents`, which already covers `.nil` and `.pair` (the cons encoding). All 22 cases of `compiler_correct_general` plus `compiler_expr_correct_head`/`_tail` closed without any change to `Related`.
+- [x] Added `IsList : Val → Prop` predicate (Rachel): `IsList .nil` and `IsList (.pair _ v2) := IsList v2`, with helpers `IsList.nil`, `IsList.cons`, and `eval_cons_isList` proving that `Eval`-of-`cons` on a list tail yields a list value.
 
 ### Part 6: Correctness Proofs for Lists
 
 - [x] Prove helper lemmas for `consr`, `isnilt`, `isnilf` (`Represents.cons`, `Represents.nil_inv`, plus the `i ≥ 1` premise on `pair_inv`).
 - [x] Discharge the `consr`, `isnilt`, `isnilf` `sorry`s in `compiler_correct_general`.
 - [x] Re-checked `compile_prog_correct`: the public signature now initializes `rbx := 1` (was `0`) to satisfy the strengthened `FreshFrom`. Compiles end-to-end as a corollary of `compiler_correct_general`.
+- [x] `compiler_expr_correct_head` and `compiler_expr_correct_tail` (Rachel) — standalone correctness lemmas for the new ops, proven against the one-instruction load codegen.
+
+### Part 6.5: Auxiliary metatheory (Rachel)
+
+- [x] **`eval_deterministic`** : `Eval ds r e v1 → Eval ds r e v2 → v1 = v2`. Big case analysis with one branch per `Eval` constructor; uses `rename_i` to recover bound names and chains IHs to identify the values.
+- [x] **Type system**: `inductive Ty`, `TyEnv := List (Var × Ty)`, `TyEnv.lookup`, `Typed : TyEnv → Expr → Ty → Prop` (well-typed expressions), `TypedVal : Val → Ty → Prop`, `TyRelated : TyEnv → Env → Prop` (env-level typing).
+- [x] **Bridging lemmas**: `TypedVal.exists` (every value has some type — needed because pair forces deep inspection), `TypedVal.ofTy` (every type is inhabited), `TyRelated.TyEnv_exists`, `TyRelatedEnv_exists`, `TyRelated.lookup`.
+- [x] **Type soundness** — `well_typed_implies_well_defined : Typed Γ e t → TyRelated Γ r → ∃ v, Eval ds r e v ∧ TypedVal v t`. Proves that well-typed expressions don't get stuck.
 
 ### Part 7: Report
 
