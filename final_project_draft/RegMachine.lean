@@ -375,14 +375,8 @@ inductive Eval : Defns -> Env -> Expr -> Val -> Prop where
     Eval ds r e (.pair v1 v2) ->
     Eval ds r (.tail e) v2
 
--- Predicate describing proper list values
-def IsList : Val -> Prop
-  | .nil => True
-  | .pair _ v2 => IsList v2
-  | _ => false
-
--- Determinism of Evaluation: Proves that if an expression `e` evaluates to a value, that value is unique.
-theorem eval_deterministic {ds r e v1 v2} : Eval ds r e v1 -> Eval ds r e v2 ->
+-- Determinism of Evaluation: Proves that if an expr `e` evaluates to a value then that value is unique
+theorem eval_implies_val {ds r e v1 v2} : Eval ds r e v1 -> Eval ds r e v2 ->
   v1 = v2 := by
   intro h1
   induction h1 generalizing v2 with
@@ -1143,10 +1137,7 @@ inductive Steps (is : List Instr) : State -> State -> Prop where
     Step is s' s'' ->
     Steps is s s''
 
-theorem Steps.append {is s s' s''} :
-  Steps is s s' ->
-  Steps is s' s'' ->
-  Steps is s s'' := by
+theorem Steps.append {is s s' s''} : Steps is s s' -> Steps is s' s'' -> Steps is s s'' := by
   intro h1 h2
   induction h2 generalizing s with
   | refl =>
@@ -1494,24 +1485,6 @@ theorem FreshFrom.step {h : Heap} {a i1 i2 : Int} :
     -- ? Now we can use the original freshness from `a`.
     have := hfresh.lookup (k + 2)
     simpa [Int.add_assoc, Int.add_left_comm, Int.add_comm] using this
-
--- IsList helper functions
-theorem IsList.nil : IsList .nil := by
-  trivial
-
- theorem IsList.cons {v1 v2} :
-  IsList v2 ->
-  IsList (.pair v1 v2) := by
-  intro h
-  simpa [IsList] using h
-
-theorem eval_cons_isList {ds r e1 e2 v1 v2} :
-  Eval ds r e1 v1 ->
-  Eval ds r e2 v2 ->
-  IsList v2 ->
-  IsList (.pair v1 v2) := by
-  intro _ _ hlist
-  exact IsList.cons hlist
 
 -- ! The compiler always produces exactly `compile_len e` instructions.
 theorem compile_length (ds : Defns) (c : CEnv) (e : Expr) :
