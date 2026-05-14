@@ -375,6 +375,30 @@ inductive Eval : Defns -> Env -> Expr -> Val -> Prop where
     Eval ds r e (.pair v1 v2) ->
     Eval ds r (.tail e) v2
 
+-- Predicate describing proper list values
+def IsList : Val -> Prop
+  | .nil => True
+  | .pair _ v2 => IsList v2
+  | _ => false
+
+-- IsList helper functions
+theorem IsList.nil : IsList .nil := by
+  trivial
+
+ theorem IsList.cons {v1 v2} :
+  IsList v2 ->
+  IsList (.pair v1 v2) := by
+  intro h
+  simpa [IsList] using h
+
+theorem eval_cons_isList {ds r e1 e2 v1 v2} :
+  Eval ds r e1 v1 ->
+  Eval ds r e2 v2 ->
+  IsList v2 ->
+  IsList (.pair v1 v2) := by
+  intro _ _ hlist
+  exact IsList.cons hlist
+
 -- Determinism of Evaluation: Proves that if an expr `e` evaluates to a value then that value is unique
 theorem eval_implies_val {ds r e v1 v2} : Eval ds r e v1 -> Eval ds r e v2 ->
   v1 = v2 := by
