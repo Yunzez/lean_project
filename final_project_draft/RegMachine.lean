@@ -273,6 +273,8 @@ inductive Expr where
   | nil : Expr
   | cons (e1 e2 : Expr) : Expr
   | is_nil (e : Expr) : Expr
+  | head (e : Expr) : Expr
+  | tail (e : Expr) : Expr
 
 inductive Defn where
   | defn (f x : Var) (e : Expr)
@@ -366,6 +368,476 @@ inductive Eval : Defns -> Env -> Expr -> Val -> Prop where
   | isnilf {ds r e v1 v2} :
     Eval ds r e (.pair v1 v2) ->
     Eval ds r (.is_nil e) (.bool false)
+  | headr {ds r e v1 v2} :
+    Eval ds r e (.pair v1 v2) ->
+    Eval ds r (.head e) v1
+  | tailr {ds r e v1 v2} :
+    Eval ds r e (.pair v1 v2) ->
+    Eval ds r (.tail e) v2
+
+-- Predicate describing proper list values
+def IsList : Val -> Prop
+  | .nil => True
+  | .pair _ v2 => IsList v2
+  | _ => false
+
+-- Determinism of Evaluation: Proves that if an expression `e` evaluates to a value, that value is unique.
+theorem eval_deterministic {ds r e v1 v2} : Eval ds r e v1 -> Eval ds r e v2 ->
+  v1 = v2 := by
+  intro h1
+  induction h1 generalizing v2 with
+  | intr i =>
+    intro h2
+    cases h2
+    rfl
+  | boolr b =>
+    intro h2
+    cases h2
+    rfl
+  | succr h ih =>
+    intro h2
+    cases h2 with
+    | succr h2 =>
+      cases ih h2
+      rfl
+  | predr h ih =>
+    intro h2
+    cases h2 with
+    | predr h2 =>
+      cases ih h2
+      rfl
+  | plusr h1 h2 ih1 ih2 =>
+    intro h
+    cases h with
+    | plusr h1' h2' =>
+      cases ih1 h1'
+      cases ih2 h2'
+      rfl
+  | timesr h1 h2 ih1 ih2 =>
+    intro h
+    cases h with
+    | timesr h1' h2' =>
+      cases ih1 h1'
+      cases ih2 h2'
+      rfl
+  | iftr hc ht ihc iht =>
+    intro h
+    cases h with
+    | iftr hc' ht' =>
+    exact iht ht'
+    | iffr hc' hf' =>
+    cases ihc hc'
+  | iffr hc hf ihc ihf =>
+    intro h
+    cases h with
+    | iftr hc' ht' =>
+    cases ihc hc'
+    | iffr hc' hf' =>
+    exact ihf hf'
+  | negtr hc ih =>
+    intro h
+    cases h with
+    | negtr hc' => rfl
+    | negfr hc' => cases ih hc'
+  | negfr hc ih =>
+    intro h
+    cases h with
+    | negtr hc' =>
+      cases ih hc'
+    | negfr hc' => rfl
+  | varr hlook =>
+    intro h
+    cases h with
+    | varr hlook' =>
+      rw [hlook] at hlook'
+      injection hlook'
+  | bindr h1 h2 ih1 ih2 =>
+    intro h
+    cases h with
+    | bindr h1' h2' =>
+      cases ih1 h1'
+      exact ih2 h2'
+  | callr ha hd hb iha ihb =>
+    intro h
+    cases h with
+    | callr ha' hd' hb' =>
+      rw [hd] at hd'
+      cases hd'
+      have hv1 := iha ha'
+      subst hv1
+      exact ihb hb'
+  | pairr h1 h2 ih1 ih2 =>
+    intro h
+    cases h with
+    | pairr h1' h2' =>
+      cases ih1 h1'
+      cases ih2 h2'
+      rfl
+  | fstr hp ih =>
+    intro h
+    cases h with
+    | fstr hp' =>
+      cases ih hp'
+      rfl
+  | sndr hp ih =>
+    intro h
+    cases h with
+    | sndr hp' =>
+      cases ih hp'
+      rfl
+  | nilr =>
+    intro h
+    cases h
+    rfl
+  | consr h1 h2 ih1 ih2 =>
+    intro h
+    cases h with
+    | consr h1' h2' =>
+      cases ih1 h1'
+      cases ih2 h2'
+      rfl
+  | isnilt h ih =>
+    intro h2
+    cases h2 with
+    | isnilt h' => rfl
+    | isnilf h' =>
+        cases ih h'
+  | isnilf h ih =>
+    intro h2
+    cases h2 with
+    | isnilt h' =>
+      cases ih h'
+    | isnilf h' =>
+      rfl
+  | headr hp ih =>
+    intro h
+    cases h with
+    | headr hp' =>
+      cases ih hp'
+      rfl
+  | tailr hp ih =>
+    intro h
+    cases h with
+    | tailr hp' =>
+      cases ih hp'
+      rfl
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- Type System
+-- ═══════════════════════════════════════════════════════════════════════════
+
+inductive Ty where
+| int : Ty
+| nil: Ty
+| bool : Ty
+| pair : Ty -> Ty -> Ty
+
+abbrev TyEnv := List (Var × Ty)
+
+def TyEnv.lookup (Γ : TyEnv) (x : Var) :=
+  match Γ with
+  | [] => none
+  | (y,t) :: Γ => if x = y then some t else TyEnv.lookup Γ x
+
+-- Well-typed expression relation
+inductive Typed : TyEnv -> Expr -> Ty -> Prop where
+| intr {Γ i} : Typed Γ (.int i) Ty.int
+| nil Γ : Typed Γ (.nil) Ty.nil
+| boolr {Γ b} : Typed Γ (.bool b) Ty.bool
+| succr {Γ e} :
+  Typed Γ e .int ->
+  Typed Γ (.succ e) .int
+| predr {Γ e} :
+  Typed Γ e .int ->
+  Typed Γ (.pred e) .int
+| plusr {Γ e1 e2} :
+  Typed Γ e1 .int ->
+  Typed Γ e2 .int ->
+  Typed Γ (.plus e1 e2) .int
+| timesr {Γ e1 e2} :
+  Typed Γ e1 .int ->
+  Typed Γ e2 .int ->
+  Typed Γ (.times e1 e2) .int
+| negr {Γ e1} :
+  Typed Γ e1 .bool ->
+  Typed Γ (.neg e1) .bool
+| ifr {Γ e1 e2 e3 t} :
+  Typed Γ e1 .bool ->
+  Typed Γ e2 t ->
+  Typed Γ e3 t ->
+  Typed Γ (.ifte e1 e2 e3) t
+| varr {Γ x t} :
+  TyEnv.lookup Γ x = some t ->
+  Typed Γ (.var x) t
+| bindr {Γ e1 t1 x e2 t2} :
+  Typed Γ e1 t1 ->
+  Typed ((x, t1) :: Γ) e2 t2 ->
+  Typed Γ (.bind x e1 e2) t2
+| pairr {Γ e1 e2 t1 t2} :
+  Typed Γ e1 t1 ->
+  Typed Γ e2 t2 ->
+  Typed Γ (.pair e1 e2) (.pair t1 t2)
+| fstr {Γ e t1 t2} :
+  Typed Γ e (.pair t1 t2) ->
+  Typed Γ (.fst e) t1
+| sndr {Γ e t1 t2} :
+  Typed Γ e (.pair t1 t2) ->
+  Typed Γ (.snd e) t2
+
+inductive TypedVal : Val -> Ty -> Prop where
+| intr {i} : TypedVal (.int i) .int
+| nilr : TypedVal (.nil) .nil
+| boolr {b} : TypedVal (.bool b) .bool
+| pair {v1 v2 t1 t2} :
+    TypedVal v1 t1 ->
+    TypedVal v2 t2 ->
+    TypedVal (Val.pair v1 v2) (Ty.pair t1 t2)
+
+inductive TyRelated : TyEnv -> Env -> Prop where
+| mt : TyRelated [] []
+| cons {Γ r v t x} :
+  TyRelated Γ r ->
+  TypedVal v t ->
+  TyRelated ((x, t) :: Γ) ((x, v) :: r)
+
+-- There is no need for this before since it's only bool or int. But now with pair we have to look deeper. not really needed but I think it will be helpful for the theorem TyRelated.TyEnv_exists
+theorem TypedVal.exists : ∀ v, ∃ t, TypedVal v t := by
+  intro v; cases v with
+  | nil => exact ⟨.nil, .nilr⟩
+  | int i => exact ⟨.int, .intr⟩
+  | bool b => exact ⟨.bool, .boolr⟩
+  | pair v1 v2 =>
+      rcases TypedVal.exists v1 with ⟨t1, ht1⟩
+      rcases TypedVal.exists v2 with ⟨t2, ht2⟩
+      exact ⟨.pair t1 t2, .pair ht1 ht2⟩
+
+theorem TyRelated.TyEnv_exists :
+  ∀ r, ∃ Γ, TyRelated Γ r := by
+  intros r
+  induction r with
+  | nil => exact ⟨[], .mt⟩
+  | cons hd tl ih =>
+    rcases ih with ⟨Γ, h⟩
+    match hd with
+    | (x, v) =>
+      cases v with
+      | nil =>
+        exact ⟨(x, .nil) :: Γ, by
+          constructor
+          · exact h
+          · exact .nilr⟩
+      | int i =>
+        exact ⟨(x, .int) :: Γ, by constructor; assumption; constructor⟩
+      | bool b =>
+        exact ⟨(x, .bool) :: Γ, by constructor; assumption; constructor⟩
+      | pair v1 v2 =>
+        rcases TypedVal.exists v1 with ⟨t1, ht1⟩
+        rcases TypedVal.exists v2 with ⟨t2, ht2⟩
+        exact ⟨(x, .pair t1 t2) :: Γ, by
+          constructor
+          · exact h
+          · exact TypedVal.pair ht1 ht2⟩
+
+-- Same rationale, it's for TyRelatedEnv_exists
+theorem TypedVal.ofTy : ∀ t, ∃ v, TypedVal v t := by
+  intro t; cases t with
+  | int => exact ⟨.int 0, .intr⟩
+  | nil => exact ⟨.nil, .nilr⟩
+  | bool => exact ⟨.bool true, .boolr⟩
+  | pair t1 t2 =>
+      rcases TypedVal.ofTy t1 with ⟨v1, hv1⟩
+      rcases TypedVal.ofTy t2 with ⟨v2, hv2⟩
+      exact ⟨.pair v1 v2, .pair hv1 hv2⟩
+
+theorem TyRelatedEnv_exists : ∀ Γ, ∃ r, TyRelated Γ r := by
+  intros Γ
+  induction Γ with
+  | nil => exact ⟨[], .mt⟩
+  | cons hd tl ih =>
+    rcases ih with ⟨r, h_rel⟩
+    let (x, t) := hd
+    rcases TypedVal.ofTy t with ⟨v, h_val⟩
+    exact ⟨(x, v) :: r, TyRelated.cons h_rel h_val⟩
+
+theorem TyRelated.lookup {Γ r x t} :
+  TyRelated Γ r ->
+  TyEnv.lookup Γ x = some t ->
+  ∃ v,
+    Env.lookup r x = some v /\
+    TypedVal v t := by
+  intros hr hlook
+  induction hr with
+  | mt => cases hlook
+  | cons hr hv hlook' =>
+    rename_i y
+    by_cases h : x = y
+    · subst h
+      simp [TyEnv.lookup] at hlook
+      subst hlook
+      simp [Env.lookup,hv]
+    · simp [TyEnv.lookup,h] at hlook
+      rcases hlook' hlook with ⟨v',hrlook,ht'⟩
+      refine ⟨v',?_,ht'⟩
+      · simp [Env.lookup,h,hrlook]
+
+-- Well-typed expressions have meaning!
+theorem well_typed_implies_well_defined {ds Γ r e t} :
+  TyRelated Γ r ->
+  Typed Γ e t ->
+  ∃ v, Eval ds r e v /\ TypedVal v t := by
+  intros hr ht
+  induction ht generalizing r with
+  | intr  =>
+    rename_i i -- show I
+    refine ⟨.int i, ?_, ?_⟩
+    . constructor
+    . constructor
+  | nil =>
+    refine ⟨.nil, ?_, ?_⟩
+    · constructor
+    · constructor
+  | boolr => -- same steps as intr
+    rename_i b -- show I
+    refine ⟨.bool b, ?_, ?_⟩
+    . constructor
+    . constructor
+  | succr =>
+    rename_i et
+    have h := et hr --put hr in et
+    rcases h with ⟨val, hvEval, goal⟩
+    -- apparently we only need case the goal lol
+    cases goal with
+    | intr =>
+      rename_i i
+      refine ⟨.int (i+1), Eval.succr hvEval, TypedVal.intr⟩
+  | predr => -- identical to succr
+    rename_i et
+    have h := et hr --put hr in et
+    rcases h with ⟨val, hvEval, goal⟩
+    -- apparently we only need case the goal lol
+    cases goal with
+    | intr =>
+      rename_i i
+      refine ⟨.int (i-1), Eval.predr hvEval, TypedVal.intr⟩
+  | plusr =>
+    rename_i add1 add2
+    have h1 := add1 hr
+    have h2 := add2 hr
+    -- similar things here
+    rcases h1 with ⟨va1, hvEval1, goal1⟩
+    rcases h2 with ⟨va2, hvEval2, goal2⟩
+    -- we have 2 h this time
+    cases goal1 with
+    | intr =>
+      rename_i i1
+      cases goal2 with
+      | intr =>
+        rename_i i2
+        refine ⟨.int (i1 + i2), ?_, ?_⟩
+        · exact Eval.plusr hvEval1 hvEval2
+        · constructor
+  | negr =>
+    rename_i rule
+    have h := rule hr
+    rcases h with ⟨ v, hvEval, hvTyped ⟩
+    cases hvTyped with
+    | boolr =>
+      rename_i bool
+      -- bool has two cases
+      cases bool with
+      | true =>
+        refine ⟨.bool false, ?_, ?_⟩
+        · exact Eval.negtr hvEval -- if true then neg is false
+        · constructor
+      | false =>
+        refine ⟨.bool true, ?_, ?_⟩
+        · exact Eval.negfr hvEval
+        · constructor
+  | timesr =>
+    -- identical logic as plus
+    rename_i time1 time2
+    have h1 := time1 hr
+    have h2 := time2 hr
+    rcases h1 with ⟨va1, hvEval1, goal1⟩
+    rcases h2 with ⟨va2, hvEval2, goal2⟩
+    cases goal1 with
+    | intr =>
+      rename_i i1
+      cases goal2 with
+      | intr =>
+        rename_i i2
+        refine ⟨.int (i1 * i2), ?_, ?_⟩
+        · exact Eval.timesr hvEval1 hvEval2
+        · constructor
+  | ifr =>
+    rename_i aih1 aih2 aih3
+    have h1 := aih1 hr
+    have h2 := aih2 hr
+    have h3 := aih3 hr
+    -- h1 has bool, case h1 first
+    rcases h1 with ⟨v1, hvEval1, hvTyped1⟩
+    rcases h2 with ⟨v2, hvEval2, hvTyped2⟩
+    rcases h3 with ⟨v3, hvEval3, hvTyped3⟩
+    cases hvTyped1 with
+    | boolr =>
+      rename_i bool
+      cases bool with
+      | false =>
+        refine ⟨v3, ?_, ?_⟩
+        · exact Eval.iffr hvEval1 hvEval3
+        · exact hvTyped3
+      | true =>
+        refine ⟨v2, ?_, ?_⟩
+        · exact Eval.iftr hvEval1 hvEval2
+        · exact hvTyped2
+  | varr =>
+    rename_i hx
+    have h := TyRelated.lookup hr hx
+    rcases h with ⟨v, hlookup, htyped⟩
+    refine ⟨v, ?_, ?_⟩
+    · exact Eval.varr hlookup
+    · exact htyped
+  | bindr =>
+    -- this variable naming thing is SOOO inconvinent...
+    rename_i ugh e1' t1' x' e2' t2' _ _ ih1 ih2
+    rcases ih1 hr with ⟨v1, hvEval1, hvTyped1⟩
+    -- we need a new enviroment after first execution, so hr'
+    have hr' := TyRelated.cons (x := x') hr hvTyped1
+    rcases ih2 hr' with ⟨v2, hvEval2, hvTyped2⟩
+    exact ⟨v2, Eval.bindr hvEval1 hvEval2, hvTyped2⟩
+  | pairr =>
+  -- this should be similar to plus
+    rename_i a1 a2
+    have h1 := a1 hr
+    have h2 := a2 hr
+    rcases h1 with ⟨va1, hvEval1, hvTyped1⟩
+    rcases h2 with ⟨va2, hvEval2, hvTyped2⟩
+    -- pair should be only int so no other cases
+    refine ⟨.pair va1 va2, ?_, ?_⟩
+    · exact Eval.pairr hvEval1 hvEval2
+    · exact TypedVal.pair hvTyped1 hvTyped2
+  | fstr =>
+    rename_i a1
+    have h1 := a1 hr
+    rcases h1 with ⟨v, hvEval, hvTyped⟩
+    cases hvTyped with
+    | pair hv1 hv2 =>
+      rename_i v1 v2 -- need to get v1 out for first
+      refine ⟨v1, ?_, ?_ ⟩
+      · exact Eval.fstr hvEval
+      · exact hv1
+  | sndr =>
+    -- same logic
+    rename_i a1
+    have h1 := a1 hr
+    rcases h1 with ⟨v, hvEval, hvTyped⟩
+    cases hvTyped with
+    | pair hv1 hv2 =>
+      rename_i v1 v2 -- need to get v1 out for first
+      refine ⟨v2, ?_, ?_ ⟩
+      · exact Eval.sndr hvEval
+      · exact hv2
+
 
 -- ───────────────────────────────────────────────────────────────────────────
 -- Sanity-check examples for the list extension (yunze).
@@ -449,6 +921,8 @@ def compile_len (e : Expr) : Nat :=
   | .nil => 1
   | .cons e1 e2 => compile_len e1 + compile_len e2 + 6
   | .is_nil e => compile_len e + 5
+  | .head e => compile_len e + 1
+  | .tail e => compile_len e + 1
 
 def compile_defn_len (d : Defn) : Nat :=
   match d with
@@ -568,6 +1042,12 @@ def compile (ds : Defns) (c : CEnv) (e : Expr) : List Instr :=
       .bnz 2,         -- if rax was non-zero (pair), skip the `movi rax 1`
       .movi .rax 1    -- nil case: set to true
     ]
+  | .head e =>
+    compile ds c e ++
+    [ .load .rax .rax 0 ]
+  | .tail e =>
+    compile ds c e ++
+    [ .load .rax .rax 1 ]
 
 def compile_defn (ds : Defns) (d : Defn) : List Instr :=
   match d with
@@ -1015,6 +1495,24 @@ theorem FreshFrom.step {h : Heap} {a i1 i2 : Int} :
     have := hfresh.lookup (k + 2)
     simpa [Int.add_assoc, Int.add_left_comm, Int.add_comm] using this
 
+-- IsList helper functions
+theorem IsList.nil : IsList .nil := by
+  trivial
+
+ theorem IsList.cons {v1 v2} :
+  IsList v2 ->
+  IsList (.pair v1 v2) := by
+  intro h
+  simpa [IsList] using h
+
+theorem eval_cons_isList {ds r e1 e2 v1 v2} :
+  Eval ds r e1 v1 ->
+  Eval ds r e2 v2 ->
+  IsList v2 ->
+  IsList (.pair v1 v2) := by
+  intro _ _ hlist
+  exact IsList.cons hlist
+
 -- ! The compiler always produces exactly `compile_len e` instructions.
 theorem compile_length (ds : Defns) (c : CEnv) (e : Expr) :
   (compile ds c e).length = compile_len e := by
@@ -1053,6 +1551,10 @@ theorem compile_length (ds : Defns) (c : CEnv) (e : Expr) :
   | cons e1 e2 ih1 ih2 =>
     simp [compile, compile_len, ih1, ih2, List.length_append, Nat.add_assoc, Nat.add_left_comm, Nat.add_comm]
   | is_nil e ih =>
+    simp [compile, compile_len, ih, List.length_append]
+  | head e ih =>
+    simp [compile, compile_len, ih, List.length_append]
+  | tail e ih =>
     simp [compile, compile_len, ih, List.length_append]
 
 -- ! A compiled function body has the expected fixed extra instructions at the end.
@@ -1377,6 +1879,126 @@ theorem compiler_expr_correct_pred
         ·
           simpa [s2, hrepr_int, Reg.read, Reg.write] using (Represents.int (i := i - 1) (h := s1.heap))
         · exact hext1
+
+
+theorem compiler_expr_correct_head
+    {ds c e v1 v2 is pc stk k rs zf h}
+    (hcode : code_at is pc (compile ds c (.head e)))
+    (hih :
+      ∃ s',
+        Steps is
+          { pc := pc, regs := rs, stack := stk ++ k, zf := zf, heap := h }
+          s' ∧
+        ExprPost e pc stk k h (.pair v1 v2) s' ∧
+        FreshFrom s'.heap s'.regs.rbx) :
+    ∃ s',
+      Steps is
+        { pc := pc, regs := rs, stack := stk ++ k, zf := zf, heap := h }
+        s' ∧
+      ExprPost (.head e) pc stk k h v1 s' ∧
+      FreshFrom s'.heap s'.regs.rbx := by
+  rcases hih with ⟨s1, hs1, hpost1, hf1⟩
+  rcases hpost1 with ⟨hpc1, hstack1, hrepr1, hext1⟩
+  rcases Represents.pair_inv hrepr1 with
+    ⟨i1, i2, hrepr_v1, hrepr_v2, l1, l2⟩
+  let s2 := {
+    s1 with
+      pc := s1.pc + 1,
+      regs := Reg.rax.write i1 s1.regs
+  }
+  refine ⟨s2, ?_, ?_, hf1⟩
+  · apply Steps.trans hs1
+    have i_head :
+        instr_at is s1.pc (Instr.load Reg.rax Reg.rax 0) := by
+      rw [hpc1]
+      unfold compile at hcode
+      have h_suffix :
+        code_at is
+          (pc + compile_len e)
+          [Instr.load Reg.rax Reg.rax 0] := by
+        have hcode' :
+            code_at is pc
+              (compile ds c e ++ [] ++ [Instr.load Reg.rax Reg.rax 0] ++ []) := by
+          simpa [List.append_assoc] using hcode
+        have htmp :=
+          code_at_after_compile_prefix
+            (ds := ds)
+            (c := c)
+            (e := e)
+            (pfx := [])
+            (mid := [Instr.load Reg.rax Reg.rax 0])
+            (sfx := [])
+            hcode'
+        simpa using htmp
+      simpa using code_at_head h_suffix
+    exact Step.load i_head rfl (by simpa using l1)
+  · constructor
+    · unfold compile_len
+      simp [s2, hpc1]
+      omega
+    · constructor
+      · simpa [s2] using hstack1
+      · exact ⟨hrepr_v1, hext1⟩
+
+
+theorem compiler_expr_correct_tail
+    {ds c e v1 v2 is pc stk k rs zf h}
+    (hcode : code_at is pc (compile ds c (.tail e)))
+    (hih :
+      ∃ s',
+        Steps is
+          { pc := pc, regs := rs, stack := stk ++ k, zf := zf, heap := h }
+          s' ∧
+        ExprPost e pc stk k h (.pair v1 v2) s' ∧
+        FreshFrom s'.heap s'.regs.rbx) :
+    ∃ s',
+      Steps is
+        { pc := pc, regs := rs, stack := stk ++ k, zf := zf, heap := h }
+        s' ∧
+      ExprPost (.tail e) pc stk k h v2 s' ∧
+      FreshFrom s'.heap s'.regs.rbx := by
+  rcases hih with ⟨s1, hs1, hpost1, hf1⟩
+  rcases hpost1 with ⟨hpc1, hstack1, hrepr1, hext1⟩
+  rcases Represents.pair_inv hrepr1 with
+    ⟨i1, i2, hrepr_v1, hrepr_v2, l1, l2⟩
+  let s2 := {
+    s1 with
+      pc := s1.pc + 1,
+      regs := Reg.rax.write i2 s1.regs
+  }
+  refine ⟨s2, ?_, ?_, hf1⟩
+  · apply Steps.trans hs1
+    have i_tail :
+        instr_at is s1.pc (Instr.load Reg.rax Reg.rax 1) := by
+      rw [hpc1]
+      unfold compile at hcode
+      have h_suffix :
+      code_at is
+        (pc + compile_len e)
+        [Instr.load Reg.rax Reg.rax 1] := by
+        have hcode' :
+            code_at is pc
+              (compile ds c e ++ [] ++ [Instr.load Reg.rax Reg.rax 1] ++ []) := by
+          simpa [List.append_assoc] using hcode
+        have htmp :=
+          code_at_after_compile_prefix
+            (ds := ds)
+            (c := c)
+            (e := e)
+            (pfx := [])
+            (mid := [Instr.load Reg.rax Reg.rax 1])
+            (sfx := [])
+            hcode'
+        simpa using htmp
+      simpa using code_at_head h_suffix
+    exact Step.load i_tail rfl (by exact l2.1)
+  · constructor
+    · unfold compile_len
+      simp [s2, hpc1]
+      omega
+    · constructor
+      · simpa [s2] using hstack1
+      · exact ⟨hrepr_v2, hext1⟩
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- SECTION 8 — Main simulation theorem
@@ -3939,8 +4561,18 @@ theorem compiler_correct_general
         simp [Reg.write]
       rw [hheap5, hrbx5]
       exact hfresh1
-
-
+  | headr _ ih =>
+    have hcode_e : code_at is pc (compile ds c _) :=
+      code_at_compile_left
+        (tail := [Instr.load Reg.rax Reg.rax 0])
+        (by simpa [compile] using hcode)
+    exact compiler_expr_correct_head hcode (ih hcode_e hrel hfresh)
+  | tailr _ ih =>
+    have hcode_e : code_at is pc (compile ds c _) :=
+      code_at_compile_left
+        (tail := [Instr.load Reg.rax Reg.rax 1])
+        (by simpa [compile] using hcode)
+    exact compiler_expr_correct_tail hcode (ih hcode_e hrel hfresh)
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- SECTION 9 — Whole-program correctness
